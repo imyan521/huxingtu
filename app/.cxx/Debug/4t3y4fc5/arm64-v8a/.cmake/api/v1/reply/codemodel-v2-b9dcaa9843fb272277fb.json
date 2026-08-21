@@ -1,0 +1,78 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"jsonFile" : "directory-.-Debug-f5ebdc15457944623624.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.6.0"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2
+					]
+				}
+			],
+			"name" : "Debug",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "cartographer-jni",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "cartographer-jni::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-cartographer-jni-Debug-9fac73d39163038405e9.json",
+					"name" : "cartographer-jni",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "floorplan-core::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-floorplan-core-Debug-22493dabf5991cdaf046.json",
+					"name" : "floorplan-core",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "floorplan-jni::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-floorplan-jni-Debug-95785a63b8fd43e20f5b.json",
+					"name" : "floorplan-jni",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "/home/cxz/Cartographer-Android0/app/.cxx/Debug/4t3y4fc5/arm64-v8a",
+		"source" : "/home/cxz/Cartographer-Android0/cartographer-android"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 3
+	}
+}

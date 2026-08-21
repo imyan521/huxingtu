@@ -1,0 +1,157 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 外层用 ScrollView 实现滑动 -->
+<ScrollView
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:fillViewport="true">
+
+    <!-- 原来的 LinearLayout 放到 ScrollView 里面 -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <Button
+            android:id="@+id/btn_start_sensor"
+            android:layout_width="match_parent"
+            android:layout_height="60dp"
+            android:text="1. 开始采集传感器 (IMU + Lidar)"
+            android:textSize="18sp"
+            android:layout_marginBottom="16dp"/>
+
+        <Button
+            android:id="@+id/btn_start_mapping"
+            android:layout_width="match_parent"
+            android:layout_height="60dp"
+            android:text="2. 启动 SLAM 建图"
+            android:textSize="18sp"
+            android:layout_marginBottom="12dp"/>
+
+        <Button
+            android:id="@+id/btn_continue_mapping"
+            android:layout_width="match_parent"
+            android:layout_height="60dp"
+            android:layout_marginBottom="12dp"
+            android:text="加载最近地图并补采"
+            android:textSize="18sp"/>
+
+        <Button
+            android:id="@+id/btn_finish_mapping"
+            android:layout_width="match_parent"
+            android:layout_height="60dp"
+            android:layout_marginBottom="12dp"
+            android:enabled="false"
+            android:text="3. 结束建图并完成优化"
+            android:textSize="18sp"/>
+
+        <Button
+            android:id="@+id/btn_cancel_continue_mapping"
+            android:layout_width="match_parent"
+            android:layout_height="52dp"
+            android:layout_marginBottom="12dp"
+            android:text="取消本次补采"
+            android:textSize="16sp"
+            android:visibility="gone"/>
+
+        <Button
+            android:id="@+id/btn_save_map"
+            android:layout_width="match_parent"
+            android:layout_height="52dp"
+            android:layout_marginBottom="8dp"
+            android:enabled="false"
+            android:text="4. 保存地图"
+            android:textSize="16sp"/>
+
+        <Button
+            android:id="@+id/btn_save_floor_plan"
+            android:layout_width="match_parent"
+            android:layout_height="52dp"
+            android:layout_marginBottom="16dp"
+            android:enabled="false"
+            android:text="5. 保存户型图"
+            android:textSize="16sp"/>
+
+        <TextView
+            android:id="@+id/tv_map_measurement"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginBottom="10dp"
+            android:background="#FFF8E1"
+            android:padding="12dp"
+            android:text="地图尺寸：--"
+            android:textColor="#3E3420"
+            android:textSize="16sp"/>
+
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="360dp"
+            android:layout_marginBottom="16dp">
+
+            <com.cartographer.demo.LidarMapView
+                android:id="@+id/map_view"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"/>
+
+            <ImageButton
+                android:id="@+id/btn_map_north"
+                android:layout_width="56dp"
+                android:layout_height="56dp"
+                android:layout_gravity="top|end"
+                android:layout_margin="10dp"
+                android:background="@drawable/bg_map_compass_button"
+                android:clickable="true"
+                android:contentDescription="磁力计：点击后将地图按磁北方向居中"
+                android:elevation="12dp"
+                android:focusable="true"
+                android:padding="5dp"
+                android:scaleType="fitCenter"
+                android:src="@drawable/ic_map_compass"
+                android:visibility="gone"/>
+
+        </FrameLayout>
+
+        <TextView
+            android:id="@+id/tv_floor_plan_title"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="户型图结果"
+            android:textSize="18sp"
+            android:textColor="#000000"
+            android:layout_marginBottom="8dp"/>
+
+        <com.cartographer.demo.ZoomableImageView
+            android:id="@+id/iv_floor_plan"
+            android:layout_width="match_parent"
+            android:layout_height="360dp"
+            android:layout_marginBottom="16dp"
+            android:adjustViewBounds="true"
+            android:background="#FFFFFF"
+            android:contentDescription="户型图结果"/>
+
+        <TextView
+            android:id="@+id/tv_pose"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="等待开始..."
+            android:textSize="18sp"
+            android:textColor="#000000"
+            android:background="#EEEEEE"
+            android:padding="16dp"/>
+
+        <!-- 实时 IMU + 雷达数据显示 -->
+        <TextView
+            android:id="@+id/tv_debug_data"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="实时传感器数据\n等待开启..."
+            android:textSize="16sp"
+            android:textColor="#222222"
+            android:background="#E3F2FD"
+            android:padding="16dp"/>
+
+    </LinearLayout>
+
+</ScrollView>

@@ -1,0 +1,78 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"jsonFile" : "directory-.-RelWithDebInfo-f5ebdc15457944623624.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.6.0"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2
+					]
+				}
+			],
+			"name" : "RelWithDebInfo",
+			"projects" : 
+			[
+				{
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "cartographer-jni",
+					"targetIndexes" : 
+					[
+						0,
+						1,
+						2
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 0,
+					"id" : "cartographer-jni::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-cartographer-jni-RelWithDebInfo-85eb7017fca2894e44b5.json",
+					"name" : "cartographer-jni",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "floorplan-core::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-floorplan-core-RelWithDebInfo-3d4ecd1cfdc82085b9f6.json",
+					"name" : "floorplan-core",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "floorplan-jni::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-floorplan-jni-RelWithDebInfo-1cba8a9f06fd789cf4c5.json",
+					"name" : "floorplan-jni",
+					"projectIndex" : 0
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "/home/cxz/Cartographer-Android0/cartographer-sdk/.cxx/RelWithDebInfo/6q5fq4f3/arm64-v8a",
+		"source" : "/home/cxz/Cartographer-Android0/cartographer-android"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 3
+	}
+}

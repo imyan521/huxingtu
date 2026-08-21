@@ -1,0 +1,11 @@
+prefix=/home/cxz/Cartographer-Android/third_party/install/glog
+exec_prefix=/home/cxz/Cartographer-Android/third_party/install/glog/bin
+libdir=/home/cxz/Cartographer-Android/third_party/install/glog/lib
+includedir=/home/cxz/Cartographer-Android/third_party/install/glog/include
+
+Name: libglog
+Description: Google Log (glog) C++ logging framework
+Version: 0.6.0
+Libs: -L${libdir} -lglog
+Libs.private: -pthread -llog
+Cflags: -I${includedir}

@@ -1,0 +1,105 @@
+package com.cartographer.demo
+
+import android.os.SystemClock // 🌟 必须导入系统时钟
+
+class LidarParser(private val carto: CartographerNative) {
+    private var currentRanges = mutableListOf<Float>()
+    private var currentAngles = mutableListOf<Float>()
+
+    // 数据缓存区
+    private val buffer = ByteArray(4096)
+    private var bufferLength = 0
+
+    // 接收从串口传来的原始字节流
+    fun onDataReceived(data: ByteArray, length: Int) {
+        // 将新数据存入缓存
+        System.arraycopy(data, 0, buffer, bufferLength, length)
+        bufferLength += length
+
+        // 只要缓存里还有足够一个包头的数据，就不断解析
+        while (bufferLength >= 10) {
+            // 1. 寻找包头 0xAA 0x55 (十进制的 170 和 85)
+            if (buffer[0].toUByte().toInt() != 0xAA || buffer[1].toUByte().toInt() != 0x55) {
+                // 如果不是包头，丢弃第一个字节，继续找
+                System.arraycopy(buffer, 1, buffer, 0, bufferLength - 1)
+                bufferLength--
+                continue
+            }
+
+            // 2. 获取当前包的采样点数量 LSN
+            val lsn = buffer[3].toUByte().toInt()
+            val packetLength = 10 + lsn * 3 // 根据说明书：头10字节 + 点数*3字节
+
+            // 如果数据还没收全，跳出循环等待下一批串口数据
+            if (bufferLength < packetLength) {
+                break
+            }
+
+            // 3. 数据收全了，开始解析这一帧数据
+            parsePacket(buffer, lsn)
+
+            // 4. 将解析完的数据从缓存中移除
+            System.arraycopy(buffer, packetLength, buffer, 0, bufferLength - packetLength)
+            bufferLength -= packetLength
+        }
+    }
+
+    private fun parsePacket(pkt: ByteArray, lsn: Int) {
+        val mt = pkt[2].toUByte().toInt()
+        val isStartFrame = (mt and 0x01) == 1 // T位：1表示新的一圈开始了
+
+        // 🌟 核心：如果雷达转完了一圈，就把上一圈攒下的数据打包喂给 Cartographer！
+        if (isStartFrame && currentRanges.isNotEmpty()) {
+
+            // ✅ 终极修复：使用底层硬件开机纳秒时间，与 IMU 的 event.timestamp 绝对对齐！
+            val timestampNs = SystemClock.elapsedRealtimeNanos()
+
+            carto.addLidarData(timestampNs, currentRanges.toFloatArray(), currentAngles.toFloatArray())
+
+            // 喂完清空，准备装新的一圈
+            currentRanges.clear()
+            currentAngles.clear()
+        }
+
+        if (lsn <= 1) return // 无效包跳过
+
+        // 解析起始角和结束角 (小端模式)
+        val fsaRaw = pkt[4].toUByte().toInt() or (pkt[5].toUByte().toInt() shl 8)
+        val lsaRaw = pkt[6].toUByte().toInt() or (pkt[7].toUByte().toInt() shl 8)
+
+        val fsa = (fsaRaw shr 1) / 64.0f
+        var lsa = (lsaRaw shr 1) / 64.0f
+
+        // 如果跨越了 360 度 (例如起始 350度，结束 10度)
+        if (lsa < fsa) {
+            lsa += 360.0f
+        }
+        val angleStep = (lsa - fsa) / (lsn - 1)
+
+        // 解析每一个点
+        for (i in 0 until lsn) {
+            val offset = 10 + i * 3
+            val s1 = pkt[offset + 1].toUByte().toInt()
+            val s2 = pkt[offset + 2].toUByte().toInt()
+
+            // 根据说明书第 6 页的公式解析距离 (单位：毫米)
+            val distanceMm = (s2 * 64) + (s1 shr 2)
+            val distanceM = distanceMm / 1000.0f // 转换为 Cartographer 需要的米
+
+            // 计算当前点的角度
+            var angleDeg = fsa + angleStep * i
+            if (angleDeg >= 360.0f) angleDeg -= 360.0f
+            val angleRad = Math.toRadians(angleDeg.toDouble()).toFloat() // 转换为弧度
+
+            // 过滤有效数据：Cartographer 需要 0.1m 到 15m 的数据
+            if (distanceM in 0.1f..15.0f) {
+                currentRanges.add(distanceM)
+                currentAngles.add(angleRad)
+            } else {
+                // 对于测不到的数据，赋一个超量程的值作为 Miss 穿透线
+                currentRanges.add(20.0f)
+                currentAngles.add(angleRad)
+            }
+        }
+    }
+}

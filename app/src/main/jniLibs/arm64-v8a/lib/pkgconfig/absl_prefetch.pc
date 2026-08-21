@@ -1,0 +1,12 @@
+prefix=/home/cxz/Cartographer-Android/third_party/build/install/absl
+exec_prefix=${prefix}
+libdir=/home/cxz/Cartographer-Android/third_party/build/install/absl/lib
+includedir=/home/cxz/Cartographer-Android/third_party/build/install/absl/include
+
+Name: absl_prefetch
+Description: Abseil prefetch library
+URL: https://abseil.io/
+Version: 20230802
+Requires: absl_config = 20230802, absl_core_headers = 20230802
+Libs: -L${libdir}  
+Cflags: -I${includedir} -Wno-float-conversion -Wno-implicit-float-conversion -Wno-implicit-int-float-conversion -Wno-unknown-warning-option -DNOMINMAX

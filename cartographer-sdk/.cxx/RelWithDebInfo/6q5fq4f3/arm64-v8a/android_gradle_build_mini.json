@@ -1,0 +1,41 @@
+{
+  "buildFiles": [
+    "/home/cxz/Cartographer-Android0/cartographer-android/CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "/home/cxz/Android/Sdk/cmake/3.22.1/bin/ninja",
+      "-C",
+      "/home/cxz/Cartographer-Android0/cartographer-sdk/.cxx/RelWithDebInfo/6q5fq4f3/arm64-v8a",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "/home/cxz/Android/Sdk/cmake/3.22.1/bin/ninja",
+    "-C",
+    "/home/cxz/Cartographer-Android0/cartographer-sdk/.cxx/RelWithDebInfo/6q5fq4f3/arm64-v8a",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {
+    "floorplan-core::@6890427a1f51a3e7e1df": {
+      "artifactName": "floorplan-core",
+      "abi": "arm64-v8a",
+      "output": "/home/cxz/Cartographer-Android0/cartographer-sdk/.cxx/RelWithDebInfo/6q5fq4f3/arm64-v8a/libfloorplan-core.a",
+      "runtimeFiles": []
+    },
+    "floorplan-jni::@6890427a1f51a3e7e1df": {
+      "artifactName": "floorplan-jni",
+      "abi": "arm64-v8a",
+      "output": "/home/cxz/Cartographer-Android0/cartographer-sdk/build/intermediates/cxx/RelWithDebInfo/6q5fq4f3/obj/arm64-v8a/libfloorplan-jni.so",
+      "runtimeFiles": [
+        "/home/cxz/Cartographer-Android0/MyApplication/app/src/main/cpp/opencv/libs/arm64-v8a/libopencv_java4.so"
+      ]
+    },
+    "cartographer-jni::@6890427a1f51a3e7e1df": {
+      "artifactName": "cartographer-jni",
+      "abi": "arm64-v8a",
+      "output": "/home/cxz/Cartographer-Android0/cartographer-sdk/build/intermediates/cxx/RelWithDebInfo/6q5fq4f3/obj/arm64-v8a/libcartographer-jni.so",
+      "runtimeFiles": []
+    }
+  }
+}

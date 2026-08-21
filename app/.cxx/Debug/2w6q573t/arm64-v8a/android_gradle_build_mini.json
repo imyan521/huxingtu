@@ -1,0 +1,27 @@
+{
+  "buildFiles": [
+    "/home/cxz/Cartographer-Android/cartographer-android/CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "/home/cxz/Android/Sdk/cmake/3.31.4/bin/ninja",
+      "-C",
+      "/home/cxz/Cartographer-Android/app/.cxx/Debug/2w6q573t/arm64-v8a",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "/home/cxz/Android/Sdk/cmake/3.31.4/bin/ninja",
+    "-C",
+    "/home/cxz/Cartographer-Android/app/.cxx/Debug/2w6q573t/arm64-v8a",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {
+    "cartographer-jni::@6890427a1f51a3e7e1df": {
+      "artifactName": "cartographer-jni",
+      "abi": "arm64-v8a",
+      "output": "/home/cxz/Cartographer-Android/app/build/intermediates/cxx/Debug/2w6q573t/obj/arm64-v8a/libcartographer-jni.so",
+      "runtimeFiles": []
+    }
+  }
+}

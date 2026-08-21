@@ -1,0 +1,10 @@
+-allowaccessmodification
+-repackageclasses 'com.cartographer.sdk.internal'
+-renamesourcefileattribute SourceFile
+-keepattributes RuntimeVisibleAnnotations,AnnotationDefault
+-keep,allowoptimization public class com.cartographer.sdk.** { public protected *; }
+-keep class com.cartographer.demo.CartographerNative { native <methods>; }
+-keep class com.cartographer.demo.FloorPlanNative { native <methods>; }
+-keep class com.cartographer.demo.MainActivity { *; }
+-keep class com.cartographer.sdk.FullExperienceActivity { *; }
+-dontwarn java.lang.invoke.StringConcatFactory

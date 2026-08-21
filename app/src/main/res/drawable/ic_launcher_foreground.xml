@@ -1,0 +1,33 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Robot body (circle) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M54,54m-18,0a18,18 0,1 1,36 0a18,18 0,1 1,-36 0"/>
+
+    <!-- Direction arrow -->
+    <path
+        android:fillColor="#F44336"
+        android:pathData="M54,36L66,54L54,48L42,54Z"/>
+
+    <!-- Grid lines -->
+    <path
+        android:strokeColor="#80FFFFFF"
+        android:strokeWidth="1"
+        android:pathData="M54,24L54,84"/>
+    <path
+        android:strokeColor="#80FFFFFF"
+        android:strokeWidth="1"
+        android:pathData="M24,54L84,54"/>
+
+    <!-- Scan arc -->
+    <path
+        android:strokeColor="#FFEB3B"
+        android:strokeWidth="2"
+        android:fillColor="#00000000"
+        android:pathData="M40,54 A14,14 0 0 1 68,54"/>
+</vector>

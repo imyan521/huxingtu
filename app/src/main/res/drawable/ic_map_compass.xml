@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="64"
+    android:viewportHeight="64">
+
+    <!-- Compass ring; the control itself stays fixed over the map. -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M32,4 A28,28 0,1 1,31.99 4"
+        android:strokeColor="#263238"
+        android:strokeWidth="2.5"/>
+
+    <!-- South points to the left. -->
+    <path
+        android:fillColor="#1976D2"
+        android:pathData="M8,32 L31,24 L27,32 L31,40 Z"/>
+
+    <!-- North points to the right. -->
+    <path
+        android:fillColor="#D32F2F"
+        android:pathData="M56,32 L33,24 L37,32 L33,40 Z"/>
+
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M32,27 A5,5 0,1 1,31.99 27"/>
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M32,27 A5,5 0,1 1,31.99 27"
+        android:strokeColor="#263238"
+        android:strokeWidth="2"/>
+
+    <!-- Small S and N labels make the fixed screen direction explicit. -->
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M13,20 C10,18 7,19 7,22 C7,25 13,24 13,27 C13,30 9,31 6,29"
+        android:strokeColor="#0D47A1"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="2"/>
+    <path
+        android:fillColor="@android:color/transparent"
+        android:pathData="M51,29 L51,19 L57,29 L57,19"
+        android:strokeColor="#B71C1C"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="2"/>
+</vector>

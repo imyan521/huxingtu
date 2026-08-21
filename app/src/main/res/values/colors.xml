@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="primary">#1976D2</color>
+    <color name="primary_dark">#1565C0</color>
+    <color name="primary_light">#42A5F5</color>
+    <color name="accent">#FF5722</color>
+    <color name="background">#FAFAFA</color>
+    <color name="surface">#FFFFFF</color>
+    <color name="error">#D32F2F</color>
+    <color name="on_primary">#FFFFFF</color>
+    <color name="on_background">#212121</color>
+    <color name="on_surface">#212121</color>
+    <color name="on_error">#FFFFFF</color>
+
+    <!-- 地图配色 -->
+    <color name="map_grid">#CCCCCC</color>
+    <color name="map_robot">#2196F3</color>
+    <color name="map_arrow">#F44336</color>
+    <color name="map_path">#4CAF50</color>
+    <color name="map_obstacle">#795548</color>
+</resources>

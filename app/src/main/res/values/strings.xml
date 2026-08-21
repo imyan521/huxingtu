@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Cartographer Demo</string>
+    <string name="status_initializing">正在初始化…</string>
+    <string name="status_ready">已就绪</string>
+    <string name="status_error">错误</string>
+    <string name="pose_title">当前位姿</string>
+    <string name="pose_x">X: %1$.3f m</string>
+    <string name="pose_y">Y: %1$.3f m</string>
+    <string name="pose_theta">θ: %1$.2f°</string>
+    <string name="permission_storage_title">需要存储权限</string>
+    <string name="permission_storage_message">应用需要存储权限才能保存地图数据。</string>
+    <string name="btn_grant_permission">授予权限</string>
+    <string name="btn_quit">退出</string>
+    <string name="sensor_unavailable">传感器不可用: %s</string>
+</resources>

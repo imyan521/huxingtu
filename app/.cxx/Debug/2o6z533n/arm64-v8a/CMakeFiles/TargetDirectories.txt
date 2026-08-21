@@ -1,0 +1,3 @@
+/home/cxz/Cartographer-Android/app/.cxx/Debug/2o6z533n/arm64-v8a/CMakeFiles/cartographer-jni.dir
+/home/cxz/Cartographer-Android/app/.cxx/Debug/2o6z533n/arm64-v8a/CMakeFiles/edit_cache.dir
+/home/cxz/Cartographer-Android/app/.cxx/Debug/2o6z533n/arm64-v8a/CMakeFiles/rebuild_cache.dir
