@@ -53,6 +53,11 @@ class LidarMapView @JvmOverloads constructor(
         Thread(runnable, "FusedMapRenderer").apply { isDaemon = true }
     }
     private var fusedMap: FusedMapRenderer.Result? = null
+    private var floorPlanOverlayBitmap: Bitmap? = null
+    private var heatMapOverlayBitmap: Bitmap? = null
+    private var pointCloudVisible = true
+    private var floorPlanOverlayVisible = true
+    private var heatMapOverlayVisible = true
     private var showingFinalizedOccupancy = false
     private var fusionGeneration = 0L
     private var fusionRunning = false
@@ -97,6 +102,12 @@ class LidarMapView @JvmOverloads constructor(
         strokeWidth = 1f
     }
     private val submapPaint = Paint(Paint.FILTER_BITMAP_FLAG).apply {
+        alpha = 255
+    }
+    private val heatMapPaint = Paint(Paint.FILTER_BITMAP_FLAG).apply {
+        alpha = 190
+    }
+    private val floorPlanOverlayPaint = Paint(Paint.FILTER_BITMAP_FLAG).apply {
         alpha = 255
     }
     private val liveScanPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -327,6 +338,57 @@ class LidarMapView @JvmOverloads constructor(
         invalidate()
     }
 
+    /** Sets a transparent floor-plan layer in the fused-map pixel frame. */
+    fun setFloorPlanOverlay(bitmap: Bitmap?): Boolean {
+        val current = fusedMap
+        if (bitmap != null && current != null && (
+                bitmap.width != current.bitmap.width ||
+                bitmap.height != current.bitmap.height)) {
+            bitmap.recycle()
+            return false
+        }
+        val previous = floorPlanOverlayBitmap
+        floorPlanOverlayBitmap = bitmap
+        if (previous !== bitmap && previous?.isRecycled == false) previous.recycle()
+        invalidate()
+        return true
+    }
+
+    /** Sets a transparent heat-map layer in the fused-map pixel frame. */
+    fun setHeatMapOverlay(bitmap: Bitmap?): Boolean {
+        val current = fusedMap
+        if (bitmap != null && current != null && (
+                bitmap.width != current.bitmap.width ||
+                bitmap.height != current.bitmap.height)) {
+            bitmap.recycle()
+            return false
+        }
+        val previous = heatMapOverlayBitmap
+        heatMapOverlayBitmap = bitmap
+        if (previous !== bitmap && previous?.isRecycled == false) previous.recycle()
+        invalidate()
+        return true
+    }
+
+    fun setMapLayerVisibility(
+        pointCloud: Boolean? = null,
+        floorPlan: Boolean? = null,
+        heatMap: Boolean? = null
+    ) {
+        pointCloud?.let { pointCloudVisible = it }
+        floorPlan?.let { floorPlanOverlayVisible = it }
+        heatMap?.let { heatMapOverlayVisible = it }
+        invalidate()
+    }
+
+    fun clearMapOverlays() {
+        floorPlanOverlayBitmap?.recycle()
+        floorPlanOverlayBitmap = null
+        heatMapOverlayBitmap?.recycle()
+        heatMapOverlayBitmap = null
+        invalidate()
+    }
+
     fun setOptimizedTrajectory(points: List<PointF>) {
         optimizedTrajectory.clear()
         optimizedTrajectory.addAll(points)
@@ -405,6 +467,10 @@ class LidarMapView @JvmOverloads constructor(
         fusionPending = false
         fusedMap?.bitmap?.recycle()
         fusedMap = null
+        floorPlanOverlayBitmap?.recycle()
+        floorPlanOverlayBitmap = null
+        heatMapOverlayBitmap?.recycle()
+        heatMapOverlayBitmap = null
         showingFinalizedOccupancy = false
         mapMeasurement = null
         latestPose = Pose2D(0.0, 0.0, 0.0)
@@ -457,6 +523,10 @@ class LidarMapView @JvmOverloads constructor(
         recycleLiveSubmapOverlays()
         fusedMap?.bitmap?.recycle()
         fusedMap = null
+        floorPlanOverlayBitmap?.recycle()
+        floorPlanOverlayBitmap = null
+        heatMapOverlayBitmap?.recycle()
+        heatMapOverlayBitmap = null
         super.onDetachedFromWindow()
     }
 
@@ -572,7 +642,19 @@ class LidarMapView @JvmOverloads constructor(
         submapMatrixValues[Matrix.MPERSP_1] = 0f
         submapMatrixValues[Matrix.MPERSP_2] = 1f
         submapMatrix.setValues(submapMatrixValues)
-        canvas.drawBitmap(fused.bitmap, submapMatrix, submapPaint)
+        if (pointCloudVisible) {
+            canvas.drawBitmap(fused.bitmap, submapMatrix, submapPaint)
+        }
+        val heatMap = heatMapOverlayBitmap
+        if (heatMapOverlayVisible && heatMap != null && !heatMap.isRecycled &&
+            heatMap.width == fused.bitmap.width && heatMap.height == fused.bitmap.height) {
+            canvas.drawBitmap(heatMap, submapMatrix, heatMapPaint)
+        }
+        val floorPlan = floorPlanOverlayBitmap
+        if (floorPlanOverlayVisible && floorPlan != null && !floorPlan.isRecycled &&
+            floorPlan.width == fused.bitmap.width && floorPlan.height == fused.bitmap.height) {
+            canvas.drawBitmap(floorPlan, submapMatrix, floorPlanOverlayPaint)
+        }
     }
 
     private fun drawLiveSubmapOverlays(

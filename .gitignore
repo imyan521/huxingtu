@@ -1,0 +1,67 @@
+# Built application files
+*.apk
+*.aab
+*.ap_
+*.dex
+
+# Generated files
+bin/
+gen/
+out/
+build/
+.app/
+dist/
+
+# Gradle
+.gradle/
+gradle-app.setting
+
+# Local configuration (SDK path, etc.)
+local.properties
+local.gradle
+
+# IntelliJ
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# Eclipse
+.classpath
+.project
+.settings/
+
+# Keystore
+*.jks
+*.keystore
+
+# NDK generated files
+*.o
+*.a
+*.so
+
+# Windows builds package these verified ARM64 JNI libraries without rebuilding
+# the full Cartographer native dependency tree.
+!app/src/main/prebuiltJniLibs/
+!app/src/main/prebuiltJniLibs/**/*.so
+
+# Debug
+*.log
+*.trace
+
+# Crashlytics
+crashlytics.properties
+crashlytics-build.properties
+
+# Maps API keys (never commit real keys)
+google_maps_api_key.xml
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Folded / backup files
+*.bak
+*.swp
+*~

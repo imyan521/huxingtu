@@ -14,6 +14,10 @@ class LidarParser(private val carto: CartographerNative) {
 
     private val scanRanges = ArrayList<Float>(720)
     private val scanAngles = ArrayList<Float>(720)
+    // Includes samples without a usable distance return. Completeness is a
+    // transport/protocol property and must not depend on whether a surface was
+    // reflective enough to return a valid range.
+    private val scanSampleAngles = ArrayList<Float>(720)
     private var lastRawAngleDeg: Float? = null
     private var waitingForScanBoundary = true
     private var liveScanAssemblyStartedAtBoundary = false
@@ -33,8 +37,12 @@ class LidarParser(private val carto: CartographerNative) {
     var aa55PacketCount = 0L
     var invalidAa55PacketCount = 0L
     var droppedIncompleteScanCount = 0L
+    var droppedSparseScanCount = 0L
     var droppedByteCount = 0L
     var rejectedOutlierPointCount = 0L
+    var acceptedScanCount = 0L
+    var lastScanCoverageDeg = 0f
+    var lastScanMaximumGapDeg = 0f
     var activeProtocol = "AA55"
     private var latestScan: LidarScan? = null
 
@@ -48,6 +56,18 @@ class LidarParser(private val carto: CartographerNative) {
     }
 
     fun getLatestScan(): LidarScan? = synchronized(scanLock) { latestScan }
+
+    fun resetMappingSessionStatistics() {
+        synchronized(parserLock) {
+            droppedIncompleteScanCount = 0L
+            droppedSparseScanCount = 0L
+            rejectedOutlierPointCount = 0L
+            acceptedScanCount = 0L
+            lastScanCoverageDeg = 0f
+            lastScanMaximumGapDeg = 0f
+            lastValidPointCount = 0
+        }
+    }
 
     fun clearLatestScanAndPendingData() {
         synchronized(parserLock) {
@@ -223,15 +243,16 @@ class LidarParser(private val carto: CartographerNative) {
 
     private fun addPoint(distanceMm: Int, angleDeg: Float, timestampNs: Long) {
         val distanceM = distanceMm / 1000.0f
-        if (distanceM !in MIN_RANGE_M..MAX_RANGE_M) return
-
         // On this device the D6 scan angles already use Cartographer's
         // counter-clockwise convention. Negating them here mirrors every
         // downstream result left-to-right.
         val cartographerAngleDeg = angleDeg.normalizeAngle()
-        if (scanRanges.isEmpty()) {
+        if (scanSampleAngles.isEmpty()) {
             scanStartNs = timestampNs
         }
+        scanSampleAngles.add(cartographerAngleDeg)
+        if (distanceM !in MIN_RANGE_M..MAX_RANGE_M) return
+
         scanRanges.add(distanceM)
         scanAngles.add(cartographerAngleDeg)
         lastShowDistance = distanceM
@@ -253,7 +274,24 @@ class LidarParser(private val carto: CartographerNative) {
     }
 
     private fun sendCurrentScan(endTimeNs: Long, publishAsLiveScan: Boolean) {
-        if (!allowSendLidar || scanRanges.size < MIN_POINTS_PER_SCAN) {
+        if (!allowSendLidar) {
+            clearCurrentScan()
+            return
+        }
+
+        val angularCoverage = LidarScanFilter.inspectAngularCoverage(
+            scanSampleAngles.toFloatArray()
+        )
+        lastScanCoverageDeg = angularCoverage.coveredDegrees
+        lastScanMaximumGapDeg = angularCoverage.maximumGapDegrees
+        if (!angularCoverage.isComplete) {
+            droppedIncompleteScanCount++
+            clearCurrentScan()
+            return
+        }
+        if (scanRanges.size < MIN_POINTS_PER_SCAN) {
+            lastValidPointCount = scanRanges.size
+            droppedSparseScanCount++
             clearCurrentScan()
             return
         }
@@ -306,6 +344,8 @@ class LidarParser(private val carto: CartographerNative) {
         val rangesArray = filteredScan.ranges
         val anglesArray = filteredScan.anglesDeg
         if (rangesArray.size < MIN_POINTS_PER_SCAN) {
+            lastValidPointCount = rangesArray.size
+            droppedSparseScanCount++
             clearCurrentScan()
             return
         }
@@ -315,6 +355,7 @@ class LidarParser(private val carto: CartographerNative) {
         }
 
         lastValidPointCount = rangesArray.size
+        acceptedScanCount++
         lastSendNs = lastTimeNs
         lastCompletedScanEndNs = lastTimeNs
         clearCurrentScan()
@@ -331,8 +372,11 @@ class LidarParser(private val carto: CartographerNative) {
                     "周期：${"%.1f".format(scanDurationSeconds * 1000f)}ms " +
                     "AA55:$aa55PacketCount 异常包:$invalidAa55PacketCount " +
                     "残帧:$droppedIncompleteScanCount " +
+                    "稀疏帧:$droppedSparseScanCount " +
                     "丢弃字节:$droppedByteCount " +
-                    "离群点:$rejectedOutlierPointCount"
+                    "离群点:$rejectedOutlierPointCount " +
+                    "覆盖:${"%.1f".format(lastScanCoverageDeg)}° " +
+                    "最大缺口:${"%.1f".format(lastScanMaximumGapDeg)}°"
             )
         }
     }
@@ -340,6 +384,7 @@ class LidarParser(private val carto: CartographerNative) {
     private fun clearCurrentScan() {
         scanRanges.clear()
         scanAngles.clear()
+        scanSampleAngles.clear()
         scanStartNs = 0L
     }
 
@@ -367,7 +412,7 @@ class LidarParser(private val carto: CartographerNative) {
         private const val MAX_PACKET_SPAN_DEG = 90.0f
         private const val MIN_POINT_ANGLE_STEP_DEG = 0.01f
         private const val MAX_POINT_ANGLE_STEP_DEG = 3.0f
-        private const val MIN_POINTS_PER_SCAN = 60
+        private const val MIN_POINTS_PER_SCAN = 120
         private const val WRAP_DETECTION_DEG = 180f
         private const val DEFAULT_SCAN_DURATION_NS = 100 * 1000_000L
         private const val MIN_SCAN_DURATION_NS = 40 * 1000_000L

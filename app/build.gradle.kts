@@ -3,6 +3,12 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+// Windows 默认使用仓库内的 ARM64 预编译 JNI 库。Linux/WSL 如需重编 C++，
+// 使用：gradlew :app:assembleDebug -PbuildNativeFromSource=true
+val buildNativeFromSource = providers.gradleProperty("buildNativeFromSource")
+    .orNull
+    .toBoolean()
+
 android {
     namespace = "com.cartographer.demo"
     compileSdk = 34
@@ -21,13 +27,15 @@ android {
             abiFilters += listOf("arm64-v8a")
         }
 
-        externalNativeBuild {
-            cmake {
-                cppFlags += listOf("-std=c++17", "-frtti", "-fexceptions")
-                arguments += listOf(
-                    "-DANDROID_STL=c++_shared",
-                    "-DANDROID_PLATFORM=android-26"
-                )
+        if (buildNativeFromSource) {
+            externalNativeBuild {
+                cmake {
+                    cppFlags += listOf("-std=c++17", "-frtti", "-fexceptions")
+                    arguments += listOf(
+                        "-DANDROID_STL=c++_shared",
+                        "-DANDROID_PLATFORM=android-26"
+                    )
+                }
             }
         }
     }
@@ -48,11 +56,12 @@ android {
         }
     }
 
-    externalNativeBuild {
-        cmake {
-            // 使用相对路径，兼容 Windows / macOS / Linux
-            path = file("../cartographer-android/CMakeLists.txt")
-            version = "3.22.1"
+    if (buildNativeFromSource) {
+        externalNativeBuild {
+            cmake {
+                path = file("../cartographer-android/CMakeLists.txt")
+                version = "3.22.1"
+            }
         }
     }
 
@@ -78,7 +87,7 @@ android {
     sourceSets {
         getByName("main") {
             java.srcDirs("src/main/java")
-            jniLibs.srcDirs("../MyApplication/app/src/main/cpp/opencv/libs")
+            jniLibs.srcDirs("src/main/prebuiltJniLibs")
         }
     }
 

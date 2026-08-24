@@ -62,4 +62,54 @@ class LidarScanFilterTest {
             0.0001f
         )
     }
+
+    @Test
+    fun acceptsContinuousFullRevolution() {
+        val angles = FloatArray(360) { it.toFloat() }
+
+        val coverage = LidarScanFilter.inspectAngularCoverage(angles)
+
+        assertEquals(true, coverage.isComplete)
+        assertEquals(359f, coverage.coveredDegrees, 0.001f)
+        assertEquals(1f, coverage.maximumGapDegrees, 0.001f)
+    }
+
+    @Test
+    fun rejectsRevolutionWithMissingPacketSector() {
+        val angles = (0..120).map(Int::toFloat) +
+            (141..359).map(Int::toFloat)
+
+        val coverage = LidarScanFilter.inspectAngularCoverage(angles.toFloatArray())
+
+        assertEquals(false, coverage.isComplete)
+        assertEquals(21f, coverage.maximumGapDegrees, 0.001f)
+    }
+
+    @Test
+    fun rejectsShortUnsupportedFarReflection() {
+        val ranges = FloatArray(360) { 2.0f }
+        ranges[100] = 7.0f
+        ranges[101] = 7.0f
+        val result = LidarScanFilter.rejectIsolatedSpikes(
+            ranges = ranges,
+            anglesDeg = FloatArray(360) { it.toFloat() }
+        )
+
+        assertEquals(2, result.rejectedPointCount)
+        assertEquals(358, result.ranges.size)
+    }
+
+    @Test
+    fun retainsThreeRayFarWall() {
+        val ranges = FloatArray(360) { 2.0f }
+        ranges[100] = 7.0f
+        ranges[101] = 7.0f
+        ranges[102] = 7.0f
+        val result = LidarScanFilter.rejectIsolatedSpikes(
+            ranges = ranges,
+            anglesDeg = FloatArray(360) { it.toFloat() }
+        )
+
+        assertEquals(0, result.rejectedPointCount)
+    }
 }

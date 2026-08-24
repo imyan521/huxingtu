@@ -87,13 +87,14 @@ TRAJECTORY_BUILDER_2D.max_acceleration_range = 10.0
 TRAJECTORY_BUILDER_2D.max_angular_velocity_range = 10.0
 TRAJECTORY_BUILDER_2D.imu_gravity_time_constant = 10.0
 TRAJECTORY_BUILDER_2D.use_online_correlative_scan_matching = true
--- A 0.30 m / 20 degree search can jump between similar parallel walls. Start
--- with a tighter but still mobile-safe window; after timestamp validation this
--- can be A/B tested against the reference's final 0.10 m / 2 degree profile.
-TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.linear_search_window = 0.15
-TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.angular_search_window = math.rad(5.0)
-TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.translation_delta_cost_weight = 2.0
-TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.rotation_delta_cost_weight = 3.0
+-- Timestamp/deskew validation is now in the parser, so use the tighter local
+-- search profile measured in the clean reference pbstream. This makes a scan
+-- less likely to jump to a similar parallel wall. Stronger delta penalties
+-- still allow normal handheld motion while rejecting implausible frame jumps.
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.linear_search_window = 0.10
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.angular_search_window = math.rad(2.0)
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.translation_delta_cost_weight = 5.0
+TRAJECTORY_BUILDER_2D.real_time_correlative_scan_matcher.rotation_delta_cost_weight = 5.0
 
 -- Give occupied wall evidence and heading consistency the same authority that
 -- produced the cleaner reference map instead of over-constraining translation.
