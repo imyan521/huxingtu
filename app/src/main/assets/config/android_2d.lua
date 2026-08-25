@@ -39,8 +39,8 @@ options = {
   num_subdivisions_per_laser_scan = 1,
   num_point_clouds = 0,
   lookup_transform_timeout_sec = 0.2,
-  submap_publish_period_sec = 0.3,
-  pose_publish_period_sec = 5e-3,
+  submap_publish_period_sec = 0.6,
+  pose_publish_period_sec = 2e-2,
   publish_to_tf = true,
   tf_publish_rate = 20.0,
   scanner_chrome_mode = false,
@@ -48,9 +48,9 @@ options = {
 
 MAP_BUILDER.use_trajectory_builder_2d = true
 -- Constraint building and pose-graph optimization must not starve the USB,
--- IMU and local-SLAM threads on Android. Three workers retain parallel loop
--- closure while leaving a core available for real-time sensor processing.
-MAP_BUILDER.num_background_threads = 3
+-- IMU and local-SLAM threads on Android. Two workers retain background loop
+-- closure while reserving more CPU time for sensor parsing and the UI.
+MAP_BUILDER.num_background_threads = 2
 
 -- IMU 模式：
 TRAJECTORY_BUILDER_2D.use_imu_data = true
@@ -103,19 +103,19 @@ TRAJECTORY_BUILDER_2D.ceres_scan_matcher.rotation_weight = 40.0
 TRAJECTORY_BUILDER_2D.ceres_scan_matcher.ceres_solver_options.max_num_iterations = 20
 -- Avoid flooding the pose graph with phone vibration while retaining genuine
 -- corner motion. Distance and time branches continue to create straight nodes.
-TRAJECTORY_BUILDER_2D.motion_filter.max_time_seconds = 1.0
-TRAJECTORY_BUILDER_2D.motion_filter.max_distance_meters = 0.15
-TRAJECTORY_BUILDER_2D.motion_filter.max_angle_radians = math.rad(0.7)
+TRAJECTORY_BUILDER_2D.motion_filter.max_time_seconds = 1.5
+TRAJECTORY_BUILDER_2D.motion_filter.max_distance_meters = 0.20
+TRAJECTORY_BUILDER_2D.motion_filter.max_angle_radians = math.rad(1.0)
 
 -- Correct accumulated error before it spans several rooms. More candidates
 -- are evaluated, but stricter scores reject look-alike corridor constraints.
-POSE_GRAPH.optimize_every_n_nodes = 35
+POSE_GRAPH.optimize_every_n_nodes = 50
 POSE_GRAPH.constraint_builder.min_score = 0.58
 -- Keep frozen-map relocalization reachable for supplement collection; the
 -- normal same-trajectory loop closures still use the stricter min_score above.
 POSE_GRAPH.constraint_builder.global_localization_min_score = 0.60
 POSE_GRAPH.constraint_builder.max_constraint_distance = 15.0
-POSE_GRAPH.constraint_builder.sampling_ratio = 0.32
+POSE_GRAPH.constraint_builder.sampling_ratio = 0.22
 POSE_GRAPH.constraint_builder.fast_correlative_scan_matcher.branch_and_bound_depth = 8
 -- Until a new trajectory connects to a loaded frozen map, every eligible node
 -- gets a global match attempt. After the trajectories connect, Cartographer

@@ -32,7 +32,6 @@ object LidarScanFilter {
         }
 
         val keep = BooleanArray(count) { true }
-        var rejected = 0
         // A complete revolution is circular. Treat its first/last samples as
         // neighbors too, otherwise a corrupt return at the packet boundary is
         // the only isolated spike that can never be rejected. For a partial
@@ -99,9 +98,38 @@ object LidarScanFilter {
                 nextDistance > currentThreshold &&
                 neighborDistance <= neighborThreshold) {
                 keep[index] = false
-                rejected++
             }
         }
+
+        // Long-range multipath/dark-surface echoes often arrive as a short
+        // cluster rather than one bad ray. Reject a far return when neither
+        // side of its small angular neighborhood supports the same surface.
+        // The comparison is radial (not Euclidean), so a real far wall with
+        // several consecutive samples survives while 1-3 ray "tails" do not.
+        for (index in 0 until count) {
+            if (!keep[index] || ranges[index] < LONG_RANGE_CHECK_START_M) continue
+            var supportedBefore = false
+            var supportedAfter = false
+            for (offset in 1..LONG_RANGE_SUPPORT_RADIUS) {
+                val before = (index + count - offset) % count
+                val after = (index + offset) % count
+                val beforeGap = forwardAngleDelta(anglesDeg[before], anglesDeg[index])
+                val afterGap = forwardAngleDelta(anglesDeg[index], anglesDeg[after])
+                if (beforeGap <= LONG_RANGE_MAX_SUPPORT_ANGLE_DEG &&
+                    keep[before] &&
+                    kotlin.math.abs(ranges[before] - ranges[index]) <= LONG_RANGE_RADIAL_TOLERANCE_M) {
+                    supportedBefore = true
+                }
+                if (afterGap <= LONG_RANGE_MAX_SUPPORT_ANGLE_DEG &&
+                    keep[after] &&
+                    kotlin.math.abs(ranges[after] - ranges[index]) <= LONG_RANGE_RADIAL_TOLERANCE_M) {
+                    supportedAfter = true
+                }
+            }
+            if (!supportedBefore && !supportedAfter) keep[index] = false
+        }
+
+        val rejected = keep.count { !it }
 
         if (rejected == 0) {
             return Result(
@@ -146,4 +174,8 @@ object LidarScanFilter {
     private const val CURRENT_GAP_MULTIPLIER = 3.0f
     private const val BASE_NEIGHBOR_SUPPORT_M = 0.10f
     private const val NEIGHBOR_SUPPORT_MULTIPLIER = 2.0f
+    private const val LONG_RANGE_CHECK_START_M = 5.0f
+    private const val LONG_RANGE_SUPPORT_RADIUS = 3
+    private const val LONG_RANGE_MAX_SUPPORT_ANGLE_DEG = 2.5f
+    private const val LONG_RANGE_RADIAL_TOLERANCE_M = 0.35f
 }

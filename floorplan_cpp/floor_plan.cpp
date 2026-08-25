@@ -3847,6 +3847,253 @@ OutlineWallAlignmentQuality EvaluateOutlineWallAlignment(
     return quality;
 }
 
+// Recover a room-sized orthogonal step that lies outside an otherwise valid
+// footprint.  The topology mask can omit such a wing when its doorway is
+// weak, even though the fused occupancy still contains the outer wall and
+// both perpendicular returns.  Requiring that U-shaped wall evidence and an
+// actual improvement in whole-outline registration keeps outdoor lidar rays
+// and isolated furniture from changing the footprint.
+bool RecoverExteriorWallBracketedStep(
+        const cv::Mat& observed_walls,
+        const cv::Mat& horizontal_walls,
+        const cv::Mat& vertical_walls,
+        double meters_per_pixel,
+        std::vector<cv::Point>* polygon) {
+    if (polygon == nullptr || polygon->size() < 4 ||
+        observed_walls.empty() || horizontal_walls.empty() ||
+        vertical_walls.empty()) {
+        return false;
+    }
+    const double resolution = std::isfinite(meters_per_pixel) &&
+            meters_per_pixel > 1e-4 ? meters_per_pixel : 0.05;
+    const OutlineWallAlignmentQuality original_quality =
+            EvaluateOutlineWallAlignment(
+                    observed_walls, *polygon, resolution);
+    // High-quality outlines should be stable across repeated scans.  Exterior
+    // step recovery is a targeted fallback for the visibly under-fitted case.
+    if (original_quality.supported_ratio >= 0.85 &&
+        original_quality.p90_distance_px <= 0.25 / resolution) {
+        return false;
+    }
+
+    const int minimum_depth = std::clamp(
+            static_cast<int>(std::round(0.35 / resolution)), 5, 14);
+    const int maximum_depth = std::clamp(
+            static_cast<int>(std::round(2.40 / resolution)), 18, 72);
+    const int normal_tolerance = std::clamp(
+            static_cast<int>(std::round(0.10 / resolution)), 1, 4);
+    const int tangent_gap = std::clamp(
+            static_cast<int>(std::round(0.30 / resolution)), 3, 10);
+    const int endpoint_search = std::clamp(
+            static_cast<int>(std::round(0.35 / resolution)), 4, 12);
+    const int minimum_run = std::clamp(
+            static_cast<int>(std::round(0.80 / resolution)), 10, 32);
+
+    struct Candidate {
+        size_t edge_index = 0;
+        bool horizontal = false;
+        int outer_coordinate = 0;
+        int tangent_begin = 0;
+        int tangent_end = 0;
+        double wall_score = 0.0;
+        std::vector<cv::Point> polygon;
+        OutlineWallAlignmentQuality quality;
+    };
+    Candidate best;
+    bool found_candidate = false;
+
+    auto pixel_near = [&](const cv::Mat& mask,
+                          bool horizontal,
+                          int coordinate,
+                          int tangent) {
+        for (int offset = -normal_tolerance;
+             offset <= normal_tolerance; ++offset) {
+            const int x = horizontal ? tangent : coordinate + offset;
+            const int y = horizontal ? coordinate + offset : tangent;
+            if (x >= 0 && x < mask.cols && y >= 0 && y < mask.rows &&
+                mask.at<uchar>(y, x) != 0) {
+                return true;
+            }
+        }
+        return false;
+    };
+    auto perpendicular_support = [&](bool horizontal,
+                                     int tangent,
+                                     int inner_coordinate,
+                                     int outer_coordinate) {
+        double best_support = 0.0;
+        for (int offset = -endpoint_search;
+             offset <= endpoint_search; ++offset) {
+            if (horizontal) {
+                best_support = std::max(
+                        best_support,
+                        VerticalWallCoverage(
+                                vertical_walls,
+                                tangent + offset,
+                                std::min(inner_coordinate, outer_coordinate),
+                                std::max(inner_coordinate, outer_coordinate) + 1,
+                                normal_tolerance));
+            } else {
+                best_support = std::max(
+                        best_support,
+                        HorizontalWallCoverage(
+                                horizontal_walls,
+                                tangent + offset,
+                                std::min(inner_coordinate, outer_coordinate),
+                                std::max(inner_coordinate, outer_coordinate) + 1,
+                                normal_tolerance));
+            }
+        }
+        return best_support;
+    };
+
+    for (size_t edge_index = 0; edge_index < polygon->size(); ++edge_index) {
+        const cv::Point start = (*polygon)[edge_index];
+        const cv::Point end = (*polygon)[(edge_index + 1) % polygon->size()];
+        const bool horizontal = start.y == end.y;
+        const bool vertical = start.x == end.x;
+        if (!horizontal && !vertical) continue;
+        const int inner_coordinate = horizontal ? start.y : start.x;
+        const int tangent_min = horizontal
+                ? std::min(start.x, end.x) : std::min(start.y, end.y);
+        const int tangent_max = horizontal
+                ? std::max(start.x, end.x) : std::max(start.y, end.y);
+        if (tangent_max - tangent_min < minimum_run) continue;
+
+        const cv::Point2f midpoint(
+                (start.x + end.x) * 0.5f,
+                (start.y + end.y) * 0.5f);
+        cv::Point2f positive_probe = midpoint;
+        if (horizontal) positive_probe.y += 2.f;
+        else positive_probe.x += 2.f;
+        const int interior_sign = cv::pointPolygonTest(
+                *polygon, positive_probe, false) >= 0.0 ? 1 : -1;
+        const int exterior_sign = -interior_sign;
+        const cv::Mat& parallel_walls = horizontal
+                ? horizontal_walls : vertical_walls;
+
+        for (int depth = minimum_depth; depth <= maximum_depth; ++depth) {
+            const int outer_coordinate =
+                    inner_coordinate + exterior_sign * depth;
+            if ((horizontal &&
+                 (outer_coordinate < 0 || outer_coordinate >= observed_walls.rows)) ||
+                (vertical &&
+                 (outer_coordinate < 0 || outer_coordinate >= observed_walls.cols))) {
+                continue;
+            }
+            int run_begin = -1;
+            int last_supported = -1;
+            int support_count = 0;
+            auto evaluate_run = [&]() {
+                if (run_begin < 0 || last_supported < run_begin) return;
+                const int span = last_supported - run_begin + 1;
+                if (span < minimum_run ||
+                    support_count / static_cast<double>(span) < 0.34) {
+                    return;
+                }
+                const double first_return = perpendicular_support(
+                        horizontal, run_begin,
+                        inner_coordinate, outer_coordinate);
+                const double second_return = perpendicular_support(
+                        horizontal, last_supported,
+                        inner_coordinate, outer_coordinate);
+                if (first_return < 0.28 || second_return < 0.28) return;
+
+                const int ordered_first = horizontal
+                        ? (start.x <= end.x ? run_begin : last_supported)
+                        : (start.y <= end.y ? run_begin : last_supported);
+                const int ordered_second = horizontal
+                        ? (start.x <= end.x ? last_supported : run_begin)
+                        : (start.y <= end.y ? last_supported : run_begin);
+                std::vector<cv::Point> stepped;
+                stepped.reserve(polygon->size() + 4);
+                for (size_t index = 0; index < polygon->size(); ++index) {
+                    stepped.push_back((*polygon)[index]);
+                    if (index != edge_index) continue;
+                    if (horizontal) {
+                        stepped.emplace_back(ordered_first, inner_coordinate);
+                        stepped.emplace_back(ordered_first, outer_coordinate);
+                        stepped.emplace_back(ordered_second, outer_coordinate);
+                        stepped.emplace_back(ordered_second, inner_coordinate);
+                    } else {
+                        stepped.emplace_back(inner_coordinate, ordered_first);
+                        stepped.emplace_back(outer_coordinate, ordered_first);
+                        stepped.emplace_back(outer_coordinate, ordered_second);
+                        stepped.emplace_back(inner_coordinate, ordered_second);
+                    }
+                }
+                stepped.erase(
+                        std::unique(stepped.begin(), stepped.end()),
+                        stepped.end());
+                const double original_area = std::fabs(
+                        cv::contourArea(*polygon));
+                const double stepped_area = std::fabs(
+                        cv::contourArea(stepped));
+                if (stepped.size() < 8 || stepped.size() % 2 != 0 ||
+                    stepped_area <= original_area ||
+                    stepped_area / std::max(1.0, original_area) > 1.28) {
+                    return;
+                }
+                const OutlineWallAlignmentQuality quality =
+                        EvaluateOutlineWallAlignment(
+                                observed_walls, stepped, resolution);
+                const double improvement = quality.supported_ratio -
+                        original_quality.supported_ratio;
+                if (improvement < 0.012 ||
+                    quality.mean_distance_px >
+                            original_quality.mean_distance_px + 0.35 ||
+                    quality.p90_distance_px >
+                            original_quality.p90_distance_px + 1.0) {
+                    return;
+                }
+                const double wall_score = improvement * 100.0 +
+                        0.01 * span + first_return + second_return;
+                if (!found_candidate || wall_score > best.wall_score) {
+                    found_candidate = true;
+                    best.edge_index = edge_index;
+                    best.horizontal = horizontal;
+                    best.outer_coordinate = outer_coordinate;
+                    best.tangent_begin = run_begin;
+                    best.tangent_end = last_supported;
+                    best.wall_score = wall_score;
+                    best.polygon = std::move(stepped);
+                    best.quality = quality;
+                }
+            };
+
+            for (int tangent = tangent_min; tangent <= tangent_max; ++tangent) {
+                const bool supported = pixel_near(
+                        parallel_walls,
+                        horizontal,
+                        outer_coordinate,
+                        tangent);
+                if (supported) {
+                    if (run_begin < 0) run_begin = tangent;
+                    last_supported = tangent;
+                    ++support_count;
+                } else if (run_begin >= 0 &&
+                           tangent - last_supported > tangent_gap) {
+                    evaluate_run();
+                    run_begin = -1;
+                    last_supported = -1;
+                    support_count = 0;
+                }
+            }
+            evaluate_run();
+        }
+    }
+
+    if (!found_candidate) return false;
+    std::cout << "[INFO] 墙体约束外轮廓台阶恢复 edge="
+              << best.edge_index
+              << " span=" << best.tangent_begin << "-"
+              << best.tangent_end
+              << " coordinate=" << best.outer_coordinate
+              << " support=" << original_quality.supported_ratio
+              << "->" << best.quality.supported_ratio << "\n";
+    *polygon = std::move(best.polygon);
+    return true;
+}
 
 // A closed rectangular room should not inherit small steps caused by wall
 // thickness, door openings or free-space raster noise.  Only snap when all
@@ -4426,6 +4673,12 @@ ClosedOutlineResult BuildTrajectoryConnectedOutline(
             exterior_wall_evidence,
             resolution,
             &aligned_polygon);
+    const bool recovered_exterior_step = RecoverExteriorWallBracketedStep(
+            aligned_observed_walls,
+            observed_horizontal_walls,
+            observed_vertical_walls,
+            resolution,
+            &aligned_polygon);
     // The connected broad-free-space mask already encodes the competitor's
     // room topology. Keep that single topology decision and only register its
     // edges to observed exterior walls. The former chain of recess filling,
@@ -4616,6 +4869,7 @@ ClosedOutlineResult BuildTrajectoryConnectedOutline(
               << " trajectory_support=" << trajectory_support
               << " free_containment=" << free_space_containment_ratio
               << " wall_snapped=" << snapped_to_walls
+              << " exterior_step_recovered=" << recovered_exterior_step
               << " component_transitions="
               << connected_component_transitions
               << " rotation=" << alignment_degrees << "\n";
