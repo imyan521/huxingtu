@@ -10,8 +10,6 @@ import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
-import android.graphics.Canvas
-import android.graphics.Color
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -60,12 +58,6 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         private const val DEVICE_TO_ROBOT_HEADING_OFFSET_RAD = 0f
         private const val MAGNETIC_CALIBRATION_TIMEOUT_MS = 10_000L
         private const val RSSI_SAMPLE_INTERVAL_MS = 1_000L
-        private const val TARGET_MAPPING_SPEED_MPS = 0.50
-        private const val MAPPING_SPEED_WARNING_MPS = 0.60
-        private const val MIN_SPEED_SAMPLE_INTERVAL_MS = 150L
-        private const val MAX_REASONABLE_POSE_STEP_M = 0.75
-        private const val SPEED_WARNING_INTERVAL_MS = 8_000L
-        private const val MIN_GOOD_SCAN_POINT_COUNT = 150
     }
 
     private enum class MappingMode {
@@ -150,23 +142,13 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
     private var latestRangeFrameIntervalMs = 0L
     private var latestLocalSlamIntervalMs = 0L
     private var latestInsertedNodeIntervalMs = 0L
-    @Volatile private var mappingStartedMs = 0L
-    private var acquisitionLastPose: Pose2D? = null
-    private var acquisitionLastPoseMs = 0L
-    private var acquisitionLastLocalSlamResult = -1L
-    private var acquisitionSpeedMps = 0.0
-    private var acquisitionDistanceMeters = 0.0
-    private var lastSpeedWarningMs = 0L
     @Volatile private var isSubmapFetchRunning = false
     @Volatile private var isRelocalizationStatusFetchRunning = false
     @Volatile private var latestSubmapCount = 0
     private var currentFloorPlanResult: File? = null
     private var currentFloorPlanDimensions: FloorPlanDimensions? = null
     private var currentFloorPlanWarning: String? = null
-    private var floorPlanPointCloudBitmap: Bitmap? = null
-    private var floorPlanOverlayBitmap: Bitmap? = null
-    private var floorPlanHeatMapBitmap: Bitmap? = null
-    private var floorPlanTrajectoryBitmap: Bitmap? = null
+    private var floorPlanLayers: FloorPlanLayers? = null
     private var floorPlanDisplayBitmap: Bitmap? = null
     private var pendingLegacyFloorPlanSave: File? = null
     private var pendingLegacyMapExport: File? = null
@@ -186,13 +168,13 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
     private val rssiSamples = ArrayList<RssiSample>()
     private var lastRssiSampleMs = 0L
 
-    private val wifiLocationPermissionLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestPermission()
-    ) { granted ->
-        if (!granted) {
+    private val wifiPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        if (permissions.values.any { !it }) {
             Toast.makeText(
                 this,
-                "未授予定位权限，将只生成点云和户型图",
+                "未授予 Wi-Fi 权限，热力图层将不可用",
                 Toast.LENGTH_LONG
             ).show()
         }
@@ -265,7 +247,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
             if (isMappingFinished) {
                 carto.reset()
             }
-            requestWifiRssiPermissionIfNeeded()
+            requestWifiRssiPermissionsIfNeeded()
             mappingMode = MappingMode.NORMAL_MAPPING
             prepareMappingUi(clearMap = true)
             startCartographer(mapToLoad = null)
@@ -329,6 +311,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         }
 
         continueSourceMapFile = latestMap
+        requestWifiRssiPermissionsIfNeeded()
 
         // A loaded state must go into a fresh MapBuilder. The loaded trajectories
         // are frozen; startCartographer creates a separate active trajectory later.
@@ -343,7 +326,6 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
     }
 
     private fun prepareMappingUi(clearMap: Boolean) {
-        mapView.clearMapOverlays()
         if (clearMap) {
             mapView.clearMap()
             clearMapMeasurement()
@@ -352,7 +334,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
             rssiSamples.clear()
             lastRssiSampleMs = 0L
         }
-        clearFloorPlanLayerBitmaps()
+        clearFloorPlanLayers()
         mapView.resetToRobotFollowing()
         btnMapNorth.visibility = View.GONE
         btnMapNorth.alpha = 1f
@@ -384,13 +366,6 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         latestRangeFrameIntervalMs = 0L
         latestLocalSlamIntervalMs = 0L
         latestInsertedNodeIntervalMs = 0L
-        mappingStartedMs = 0L
-        acquisitionLastPose = null
-        acquisitionLastPoseMs = 0L
-        acquisitionLastLocalSlamResult = -1L
-        acquisitionSpeedMps = 0.0
-        acquisitionDistanceMeters = 0.0
-        lastSpeedWarningMs = 0L
         latestSubmapCount = 0
         if (mappingMode == MappingMode.NORMAL_MAPPING) {
             relocalizationPhase = RelocalizationPhase.NOT_REQUIRED
@@ -438,33 +413,12 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                         return@Thread
                     }
                     val oldSubmaps = carto.getSubmapTextures()
-                    val savedRssiSamples = MapLayerStore.loadRssiSamples(mapToLoad)
-                    val savedPointCloud = MapLayerStore.pointCloudFileFor(mapToLoad)
-                        .takeIf { it.exists() }
-                        ?.let { BitmapFactory.decodeFile(it.absolutePath) }
-                    val savedFloorPlanOverlay = MapLayerStore.floorPlanFileFor(mapToLoad)
-                        .takeIf { it.exists() }
-                        ?.let { BitmapFactory.decodeFile(it.absolutePath) }
-                    val savedHeatMapOverlay = MapLayerStore.heatMapFileFor(mapToLoad)
-                        .takeIf { it.exists() }
-                        ?.let { BitmapFactory.decodeFile(it.absolutePath) }
-                    val savedTrajectoryOverlay = MapLayerStore.trajectoryFileFor(mapToLoad)
-                        .takeIf { it.exists() }
-                        ?.let { BitmapFactory.decodeFile(it.absolutePath) }
-                    rssiSamples.clear()
-                    rssiSamples.addAll(savedRssiSamples)
                     loadedMapNorthAlignment = MapMetadataStore.load(mapToLoad)
                     pendingNorthAlignment = loadedMapNorthAlignment
                     runOnUiThread {
                         continueBaseSubmaps = oldSubmaps
                         latestSubmapCount = oldSubmaps.size
                         mapView.setSubmapTextures(oldSubmaps)
-                        setFloorPlanLayerBitmaps(
-                            savedPointCloud,
-                            savedFloorPlanOverlay,
-                            savedHeatMapOverlay,
-                            savedTrajectoryOverlay
-                        )
                         // Map measurement/floor-plan geometry is not needed for
                         // relocalization and can be expensive on a large frozen
                         // map. Recompute it once matching succeeds.
@@ -477,8 +431,6 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                     return@Thread
                 }
 
-                lidarParser.resetMappingSessionStatistics()
-                mappingStartedMs = SystemClock.elapsedRealtime()
                 setDataReceivePaused(false)
                 if (mapToLoad != null) {
                     relocalizationStartedMs = SystemClock.elapsedRealtime()
@@ -486,8 +438,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                 runOnUiThread {
                     btnFinishMapping.isEnabled = mapToLoad == null
                     show(if (mapToLoad == null) {
-                        "✅ 建图启动成功：速度保持≤%.1f m/s，关键墙体正反各走一遍"
-                            .format(Locale.US, TARGET_MAPPING_SPEED_MPS)
+                        "✅ 建图启动成功"
                     } else {
                         "旧地图已加载，正在重定位；请在已建区域缓慢移动和转动"
                     })
@@ -673,7 +624,6 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                 val nowMs = SystemClock.elapsedRealtime()
                 updateSlamTiming(status, nowMs)
                 val pose2d = pose?.to2D()
-                updateAcquisitionMotion(pose2d, status, nowMs)
                 maybeSampleWifiRssi(pose2d, nowMs)
                 val latestScan = lidarParser.getLatestScan()
                 val scanAgeNs = latestScan?.let {
@@ -700,16 +650,10 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                     isSensorRunning -> "IMU + LiDAR 已开启"
                     else -> "待机"
                 }
-                val acquisitionGuidance = formatAcquisitionGuidance(status, nowMs)
                 tvPose.text = if (pose2d != null) {
-                    "$tip\n$acquisitionGuidance\nIMU:$imuCount 雷达:$lidarCount\n" +
-                        "X:%.2f Y:%.2f θ:%.1f°".format(
-                            pose2d.x,
-                            pose2d.y,
-                            Math.toDegrees(pose2d.theta)
-                        )
+                    "$tip\nIMU:$imuCount 雷达:$lidarCount\nX:%.2f Y:%.2f θ:%.1f°".format(pose2d.x, pose2d.y, Math.toDegrees(pose2d.theta))
                 } else {
-                    "$tip\n$acquisitionGuidance\nIMU:$imuCount 雷达:$lidarCount"
+                    "$tip\nIMU:$imuCount 雷达:$lidarCount"
                 }
 
                 // ===============================
@@ -741,16 +685,8 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                     AA55包：${lidarParser.aa55PacketCount}
                     异常包：${lidarParser.invalidAa55PacketCount}
                     残缺转圈：${lidarParser.droppedIncompleteScanCount}
-                    稀疏转圈：${lidarParser.droppedSparseScanCount}
-                    接收整圈：${lidarParser.acceptedScanCount}
                     丢弃字节：${lidarParser.droppedByteCount}
                     离群点：${lidarParser.rejectedOutlierPointCount}
-                    角覆盖：${String.format(Locale.US, "%.1f°", lidarParser.lastScanCoverageDeg)}
-                    最大角缺口：${String.format(Locale.US, "%.1f°", lidarParser.lastScanMaximumGapDeg)}
-
-                    采集质量：
-                    $acquisitionGuidance
-                    累计路径：${String.format(Locale.US, "%.1f m", acquisitionDistanceMeters)}
 
                     Cartographer：
                     雷达帧：${status.rangeFrames}
@@ -773,40 +709,6 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                 h.postDelayed(this, 100)
             }
         })
-    }
-
-    private fun requestWifiRssiPermissionIfNeeded() {
-        if (ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            ) != PackageManager.PERMISSION_GRANTED) {
-            wifiLocationPermissionLauncher.launch(Manifest.permission.ACCESS_FINE_LOCATION)
-        }
-    }
-
-    @Suppress("DEPRECATION")
-    private fun maybeSampleWifiRssi(pose: Pose2D?, nowMs: Long) {
-        if (!isMappingRunning || pose == null ||
-            nowMs - lastRssiSampleMs < RSSI_SAMPLE_INTERVAL_MS ||
-            ContextCompat.checkSelfPermission(
-                this,
-                Manifest.permission.ACCESS_FINE_LOCATION
-            ) != PackageManager.PERMISSION_GRANTED) {
-            return
-        }
-        val rssi = try {
-            wifiManager.connectionInfo?.rssi ?: return
-        } catch (_: SecurityException) {
-            return
-        }
-        if (rssi !in -127..-1) return
-        rssiSamples += RssiSample(
-            worldX = pose.x.toFloat(),
-            worldY = pose.y.toFloat(),
-            rssiDbm = rssi.toFloat(),
-            timestampMillis = System.currentTimeMillis()
-        )
-        lastRssiSampleMs = nowMs
     }
 
     private fun updateSlamTiming(status: SlamStatus, nowMs: Long) {
@@ -833,88 +735,57 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         }
     }
 
-    private fun updateAcquisitionMotion(
-        pose: Pose2D?,
-        status: SlamStatus,
-        nowMs: Long
-    ) {
-        if (!isMappingRunning || isFinishingMapping || pose == null ||
-            status.localSlamResults <= 0L ||
-            status.localSlamResults == acquisitionLastLocalSlamResult) {
-            return
+    private fun requestWifiRssiPermissionsIfNeeded() {
+        val missing = buildList {
+            if (ContextCompat.checkSelfPermission(
+                    this@MainActivity,
+                    Manifest.permission.ACCESS_FINE_LOCATION
+                ) != PackageManager.PERMISSION_GRANTED) {
+                add(Manifest.permission.ACCESS_FINE_LOCATION)
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+                ContextCompat.checkSelfPermission(
+                    this@MainActivity,
+                    Manifest.permission.NEARBY_WIFI_DEVICES
+                ) != PackageManager.PERMISSION_GRANTED) {
+                add(Manifest.permission.NEARBY_WIFI_DEVICES)
+            }
         }
-        acquisitionLastLocalSlamResult = status.localSlamResults
-
-        val previousPose = acquisitionLastPose
-        val previousMs = acquisitionLastPoseMs
-        if (previousPose == null || previousMs <= 0L) {
-            acquisitionLastPose = pose
-            acquisitionLastPoseMs = nowMs
-            return
-        }
-        val elapsedMs = nowMs - previousMs
-        if (elapsedMs < MIN_SPEED_SAMPLE_INTERVAL_MS) return
-
-        acquisitionLastPose = pose
-        acquisitionLastPoseMs = nowMs
-        val distance = kotlin.math.hypot(
-            pose.x - previousPose.x,
-            pose.y - previousPose.y
-        )
-        // Global optimization or relocalization can move the reported frame in
-        // one update. Do not present that map correction as operator speed.
-        if (!distance.isFinite() || distance > MAX_REASONABLE_POSE_STEP_M) {
-            return
-        }
-        acquisitionDistanceMeters += distance
-        val instantaneousSpeed = distance * 1_000.0 / elapsedMs
-        acquisitionSpeedMps = if (acquisitionSpeedMps <= 0.0) {
-            instantaneousSpeed
-        } else {
-            acquisitionSpeedMps * 0.72 + instantaneousSpeed * 0.28
-        }
-
-        val mappingAgeMs = if (mappingStartedMs > 0L) nowMs - mappingStartedMs else 0L
-        if (mappingAgeMs > 3_000L &&
-            acquisitionSpeedMps > MAPPING_SPEED_WARNING_MPS &&
-            nowMs - lastSpeedWarningMs >= SPEED_WARNING_INTERVAL_MS) {
-            lastSpeedWarningMs = nowMs
-            Toast.makeText(
-                this,
-                "移动过快（%.2f m/s），请降到%.1f m/s以内并保持雷达平稳"
-                    .format(
-                        Locale.US,
-                        acquisitionSpeedMps,
-                        TARGET_MAPPING_SPEED_MPS
-                    ),
-                Toast.LENGTH_LONG
-            ).show()
-        }
+        if (missing.isNotEmpty()) wifiPermissionLauncher.launch(missing.toTypedArray())
     }
 
-    private fun formatAcquisitionGuidance(status: SlamStatus, nowMs: Long): String {
-        if (!isMappingRunning || isFinishingMapping) return "采集质量：--"
-        val accepted = lidarParser.acceptedScanCount
-        val dropped = lidarParser.droppedIncompleteScanCount +
-            lidarParser.droppedSparseScanCount
-        val attempted = accepted + dropped
-        val dropRatio = if (attempted > 0L) dropped.toDouble() / attempted else 0.0
-        val mappingAgeMs = if (mappingStartedMs > 0L) nowMs - mappingStartedMs else 0L
-        val state = when {
-            lidarParser.lastScanMaximumGapDeg > 5.0f ->
-                "雷达帧缺扇区，请检查USB连接"
-            attempted >= 10L && dropRatio > 0.10 ->
-                "丢帧偏多，请停稳并检查雷达数据线"
-            lidarParser.lastValidPointCount in 1 until MIN_GOOD_SCAN_POINT_COUNT ->
-                "有效回波偏少，请靠近墙面并放慢"
-            acquisitionSpeedMps > MAPPING_SPEED_WARNING_MPS ->
-                "移动过快，请降到%.1f m/s以内"
-                    .format(Locale.US, TARGET_MAPPING_SPEED_MPS)
-            mappingAgeMs in 1L..3_000L || status.localSlamResults <= 0L ->
-                "正在建立稳定初始位姿"
-            else -> "良好，关键墙体请正反各采一次"
+    private fun hasWifiRssiPermissions(): Boolean {
+        val hasLocation = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.ACCESS_FINE_LOCATION
+        ) == PackageManager.PERMISSION_GRANTED
+        val hasNearby = Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU ||
+            ContextCompat.checkSelfPermission(
+                this,
+                Manifest.permission.NEARBY_WIFI_DEVICES
+            ) == PackageManager.PERMISSION_GRANTED
+        return hasLocation && hasNearby
+    }
+
+    @Suppress("DEPRECATION")
+    private fun maybeSampleWifiRssi(pose: Pose2D?, nowMs: Long) {
+        if (!isMappingRunning || pose == null ||
+            nowMs - lastRssiSampleMs < RSSI_SAMPLE_INTERVAL_MS ||
+            !hasWifiRssiPermissions()) return
+
+        val rssi = try {
+            wifiManager.connectionInfo?.rssi ?: return
+        } catch (_: SecurityException) {
+            return
         }
-        return "采集质量：$state　速度：${String.format(Locale.US, "%.2f", acquisitionSpeedMps)} m/s"
+        if (rssi !in -126..-1) return
+        rssiSamples += RssiSample(
+            worldX = pose.x.toFloat(),
+            worldY = pose.y.toFloat(),
+            rssiDbm = rssi.toFloat(),
+            timestampMillis = System.currentTimeMillis()
+        )
+        lastRssiSampleMs = nowMs
     }
 
     private fun formatInterval(intervalMs: Long): String {
@@ -1155,10 +1026,6 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
             val alignmentForSave = pendingNorthAlignment
             val metadataSaved = ok && alignmentForSave != null &&
                 MapMetadataStore.save(output, alignmentForSave)
-            val rssiSaved = ok && MapLayerStore.saveRssiSamples(
-                output,
-                rssiSamples.toList()
-            )
             var publicMapLocation: String? = null
             var publicMapExportError: String? = null
             if (ok) {
@@ -1220,17 +1087,6 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                 Log.e("CartographerJNI", "生成户型图失败", e)
                 null
             }
-            val renderedLayersSaved = if (ok && floorPlanResult != null) {
-                MapLayerStore.saveRenderedLayers(
-                    mapFile = output,
-                    pointCloud = floorPlanOutput?.visual,
-                    floorPlanOverlay = floorPlanResult.floorPlanOverlay,
-                    heatMapOverlay = floorPlanResult.heatMapOverlay,
-                    trajectoryOverlay = floorPlanResult.trajectoryOverlay
-                )
-            } else {
-                false
-            }
 
             runOnUiThread {
                 btnSaveMap.isEnabled = true
@@ -1255,13 +1111,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                     metadataSaved -> "\n磁北方向信息：已保存"
                     else -> "\n地图已保存，但磁北方向元数据保存失败"
                 }
-                val layerText = if (!ok) "" else when {
-                    !rssiSaved -> "\nRSSI样本保存失败"
-                    floorPlanResult != null && !renderedLayersSaved ->
-                        "\n地图图层配套文件保存失败"
-                    else -> "\n地图图层数据：已保存"
-                }
-                show("$mapText\n$floorPlanText$northText$layerText")
+                show("$mapText\n$floorPlanText$northText")
             }
         }.start()
     }
@@ -1619,6 +1469,15 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
             generation = generation,
             geometry = export.geometry
         )
+        val clippedOccupancy = File(workDir, "occupancy_clipped.png")
+            .takeIf { it.exists() }
+            ?.let { BitmapFactory.decodeFile(it.absolutePath) }
+        if (clippedOccupancy != null) {
+            runOnUiThread {
+                mapView.setFinalizedOccupancyBitmap(clippedOccupancy)
+            }
+        }
+
         val displayFloorPlanOverlayFile = File(workDir, "floorplan_display_overlay.png")
         File(workDir, "floorplan_overlay.png")
             .takeIf { it.exists() }
@@ -1634,7 +1493,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                     try {
                         FileOutputStream(displayFloorPlanOverlayFile).use { stream ->
                             if (!labeled.compress(Bitmap.CompressFormat.PNG, 100, stream)) {
-                                throw IOException("带尺寸户型图层写入失败")
+                                throw IOException("透明户型图层写入失败")
                             }
                         }
                     } finally {
@@ -1642,22 +1501,24 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                     }
                 }
             }
-        val heatMapOverlay = HeatMapRenderer.render(
+
+        val heatMapOverlayFile = File(workDir, "heatmap_overlay.png")
+        HeatMapRenderer.render(
             samples = rssiSamples.toList(),
             geometry = export.geometry,
             outlinePixels = generation.outlineVerticesPixels
-        )
-        if (heatMapOverlay != null) {
-            val heatMapFile = File(workDir, "heatmap_overlay.png")
-            FileOutputStream(heatMapFile).use { stream ->
-                if (!heatMapOverlay.compress(Bitmap.CompressFormat.PNG, 100, stream)) {
-                    throw IOException("透明热力图层写入失败")
+        )?.let { heatMap ->
+            try {
+                FileOutputStream(heatMapOverlayFile).use { stream ->
+                    if (!heatMap.compress(Bitmap.CompressFormat.PNG, 100, stream)) {
+                        throw IOException("透明热力图层写入失败")
+                    }
                 }
+            } finally {
+                heatMap.recycle()
             }
-            heatMapOverlay.recycle()
-        } else {
-            Log.i("HeatMap", "没有有效RSSI样本，跳过热力图层")
-        }
+        } ?: Log.i("HeatMap", "有效 RSSI 样本不足，跳过热力图层")
+
         val trajectoryOverlayFile = File(workDir, "trajectory_overlay.png")
         TrajectoryOverlayRenderer.render(
             width = export.geometry.widthPx,
@@ -1682,10 +1543,8 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
             sharedMapMeasurement = sharedMapMeasurement,
             structuralMap = File(workDir, "best_structural_map.png")
                 .takeIf { it.exists() },
-            floorPlanOverlay = displayFloorPlanOverlayFile
-                .takeIf { it.exists() },
-            heatMapOverlay = File(workDir, "heatmap_overlay.png")
-                .takeIf { it.exists() },
+            floorPlanOverlay = displayFloorPlanOverlayFile.takeIf { it.exists() },
+            heatMapOverlay = heatMapOverlayFile.takeIf { it.exists() },
             trajectoryOverlay = trajectoryOverlayFile.takeIf { it.exists() }
         )
     }
@@ -1743,13 +1602,27 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
             currentFloorPlanDimensions = null
             currentFloorPlanWarning = null
             btnSaveFloorPlan.isEnabled = false
-            clearFloorPlanLayerBitmaps()
+            clearFloorPlanLayers()
             updateMeasurementDisplay()
             return "户型图 PNG 导出失败"
         }
 
+        val layerExport = export ?: run {
+            clearFloorPlanLayers()
+            currentFloorPlanResult = null
+            btnSaveFloorPlan.isEnabled = false
+            return "点云图层数据缺失"
+        }
+        val pointCloud = BitmapFactory.decodeFile(layerExport.visual.absolutePath)
+        if (pointCloud == null) {
+            clearFloorPlanLayers()
+            currentFloorPlanResult = null
+            btnSaveFloorPlan.isEnabled = false
+            return "点云图层解码失败"
+        }
+
         currentFloorPlanResult = selected
-        currentFloorPlanDimensions = generated?.dimensions ?: export?.previewDimensions
+        currentFloorPlanDimensions = generated?.dimensions ?: layerExport.previewDimensions
         generated?.sharedMapMeasurement?.let { sharedMeasurement ->
             // Invalidate any older asynchronous raster-bounds calculation and
             // drive the map overlay from the same fitted outline used by the
@@ -1766,17 +1639,21 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
             else -> null
         }
         btnSaveFloorPlan.isEnabled = true
-        setFloorPlanLayerBitmaps(
-            pointCloud = export?.visual?.let { BitmapFactory.decodeFile(it.absolutePath) },
-            floorPlan = generated?.floorPlanOverlay?.let {
-                BitmapFactory.decodeFile(it.absolutePath)
-            },
-            heatMap = generated?.heatMapOverlay?.let {
-                BitmapFactory.decodeFile(it.absolutePath)
-            },
-            trajectory = generated?.trajectoryOverlay?.let {
-                BitmapFactory.decodeFile(it.absolutePath)
-            }
+        setFloorPlanLayers(
+            FloorPlanLayers(
+                width = layerExport.geometry.widthPx,
+                height = layerExport.geometry.heightPx,
+                pointCloud = pointCloud,
+                heatMap = generated?.heatMapOverlay?.let {
+                    BitmapFactory.decodeFile(it.absolutePath)
+                },
+                trajectory = generated?.trajectoryOverlay?.let {
+                    BitmapFactory.decodeFile(it.absolutePath)
+                },
+                floorPlan = generated?.floorPlanOverlay?.let {
+                    BitmapFactory.decodeFile(it.absolutePath)
+                }
+            )
         )
         updateMeasurementDisplay()
 
@@ -1790,70 +1667,56 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         return "$resultDescription\n$dimensionsText$warningText"
     }
 
-    private fun setFloorPlanLayerBitmaps(
-        pointCloud: Bitmap?,
-        floorPlan: Bitmap?,
-        heatMap: Bitmap?,
-        trajectory: Bitmap? = null
-    ) {
-        clearFloorPlanLayerBitmaps()
-        floorPlanPointCloudBitmap = pointCloud
-        floorPlanOverlayBitmap = floorPlan
-        floorPlanHeatMapBitmap = heatMap
-        floorPlanTrajectoryBitmap = trajectory
+    private fun setFloorPlanLayers(layers: FloorPlanLayers) {
+        clearFloorPlanLayers()
+        floorPlanLayers = layers
+        checkPointCloud.isEnabled = layers.pointCloud != null
+        checkFloorPlanOverlay.isEnabled = layers.floorPlan != null
+        checkHeatMapOverlay.isEnabled = layers.heatMap != null
+        checkTrajectoryOverlay.isEnabled = layers.trajectory != null
+        checkHeatMapOverlay.text = if (layers.heatMap != null) {
+            "热力图"
+        } else {
+            "热力图（无数据）"
+        }
         refreshFloorPlanLayerPreview()
     }
 
     private fun refreshFloorPlanLayerPreview() {
-        val layers = listOfNotNull(
-            floorPlanPointCloudBitmap,
-            floorPlanHeatMapBitmap,
-            floorPlanTrajectoryBitmap,
-            floorPlanOverlayBitmap
-        ).filterNot { it.isRecycled }
-        val reference = layers.firstOrNull()
-        if (reference == null) {
-            floorPlanView.setImageBitmap(null)
-            floorPlanDisplayBitmap?.recycle()
-            floorPlanDisplayBitmap = null
-            return
-        }
-        val output = Bitmap.createBitmap(
-            reference.width,
-            reference.height,
-            Bitmap.Config.ARGB_8888
-        )
-        val canvas = Canvas(output)
-        canvas.drawColor(Color.WHITE)
-        fun drawLayer(bitmap: Bitmap?, enabled: Boolean) {
-            if (enabled && bitmap != null && !bitmap.isRecycled &&
-                bitmap.width == output.width && bitmap.height == output.height) {
-                canvas.drawBitmap(bitmap, 0f, 0f, null)
-            }
-        }
-        drawLayer(floorPlanPointCloudBitmap, checkPointCloud.isChecked)
-        drawLayer(floorPlanHeatMapBitmap, checkHeatMapOverlay.isChecked)
-        drawLayer(floorPlanTrajectoryBitmap, checkTrajectoryOverlay.isChecked)
-        drawLayer(floorPlanOverlayBitmap, checkFloorPlanOverlay.isChecked)
-
+        val layers = floorPlanLayers ?: return
+        val output = FloorPlanLayerComposer.compose(
+            layers,
+            FloorPlanLayerVisibility(
+                pointCloud = checkPointCloud.isChecked,
+                heatMap = checkHeatMapOverlay.isChecked,
+                trajectory = checkTrajectoryOverlay.isChecked,
+                floorPlan = checkFloorPlanOverlay.isChecked
+            )
+        ) ?: return
         val previous = floorPlanDisplayBitmap
         floorPlanDisplayBitmap = output
         floorPlanView.setImageBitmap(output)
         if (previous !== output && previous?.isRecycled == false) previous.recycle()
     }
 
-    private fun clearFloorPlanLayerBitmaps() {
+    private fun clearFloorPlanLayers() {
         floorPlanView.setImageBitmap(null)
-        floorPlanDisplayBitmap?.recycle()
+        floorPlanDisplayBitmap?.takeIf { !it.isRecycled }?.recycle()
         floorPlanDisplayBitmap = null
-        floorPlanPointCloudBitmap?.recycle()
-        floorPlanPointCloudBitmap = null
-        floorPlanOverlayBitmap?.recycle()
-        floorPlanOverlayBitmap = null
-        floorPlanHeatMapBitmap?.recycle()
-        floorPlanHeatMapBitmap = null
-        floorPlanTrajectoryBitmap?.recycle()
-        floorPlanTrajectoryBitmap = null
+        floorPlanLayers?.let { layers ->
+            listOfNotNull(
+                layers.pointCloud,
+                layers.heatMap,
+                layers.trajectory,
+                layers.floorPlan
+            ).distinct().forEach { bitmap ->
+                if (!bitmap.isRecycled) bitmap.recycle()
+            }
+        }
+        floorPlanLayers = null
+        if (::checkHeatMapOverlay.isInitialized) {
+            checkHeatMapOverlay.text = "热力图"
+        }
     }
 
     private fun formatFloorPlanDimensions(dimensions: FloorPlanDimensions?): String {
@@ -2180,6 +2043,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
 
     override fun onAccuracyChanged(s: Sensor?, a: Int) {}
     override fun onDestroy() {
+        clearFloorPlanLayers()
         super.onDestroy()
         isMagneticCalibrationRunning = false
         magneticHeadingProvider.stop()

@@ -18,29 +18,50 @@ data class RssiSample(
     val timestampMillis: Long = 0L
 )
 
-/** Renders RSSI samples in exactly the same pixel frame as floor-plan export. */
+/** Renders a transparent RSSI layer in the exact floor-plan export frame. */
 object HeatMapRenderer {
     private const val GRID_SIZE = 128
+    private const val MAX_INTERPOLATION_SAMPLES = 600
+    private const val MAX_SUPPORT_DISTANCE_METERS = 5f
+    private const val MIN_DISTANCE_SQUARED = 0.0025
+    private const val LAYER_ALPHA = 155
 
     fun render(
         samples: List<RssiSample>,
         geometry: FloorPlanMapExporter.ExportGeometry,
         outlinePixels: List<FloorPlanPixelPoint>
     ): Bitmap? {
-        val validSamples = samples.filter {
+        val allValidSamples = samples.filter {
             it.worldX.isFinite() && it.worldY.isFinite() &&
                 it.rssiDbm.isFinite() && it.rssiDbm in -150f..0f
         }
-        if (validSamples.isEmpty() || outlinePixels.size < 3 ||
+        if (allValidSamples.size < 3 || outlinePixels.size < 3 ||
             geometry.widthPx <= 0 || geometry.heightPx <= 0) return null
+
+        // Keep interpolation time bounded on long mapping sessions while
+        // retaining samples uniformly across the complete acquisition.
+        val sampleStep = max(
+            1,
+            ceil(allValidSamples.size.toDouble() / MAX_INTERPOLATION_SAMPLES).toInt()
+        )
+        val validSamples = allValidSamples.filterIndexed { index, _ ->
+            index % sampleStep == 0 || index == allValidSamples.lastIndex
+        }
 
         val gridWidth = min(GRID_SIZE, geometry.widthPx)
         val gridHeight = min(
             GRID_SIZE,
-            max(1, ceil(gridWidth * geometry.heightPx.toDouble() /
-                geometry.widthPx.toDouble()).toInt())
+            max(
+                1,
+                ceil(
+                    gridWidth * geometry.heightPx.toDouble() /
+                        geometry.widthPx.toDouble()
+                ).toInt()
+            )
         )
         val pixels = IntArray(gridWidth * gridHeight)
+        val supportDistanceSquared =
+            MAX_SUPPORT_DISTANCE_METERS * MAX_SUPPORT_DISTANCE_METERS
         for (gridY in 0 until gridHeight) {
             val pixelY = (gridY + 0.5f) * geometry.heightPx / gridHeight
             val worldY = geometry.worldMaxY -
@@ -51,25 +72,33 @@ object HeatMapRenderer {
                     pixelX * geometry.resolutionMetersPerPixel
                 var weightedRssi = 0.0
                 var weightSum = 0.0
+                var nearestDistanceSquared = Double.POSITIVE_INFINITY
                 for (sample in validSamples) {
                     val dx = worldX - sample.worldX
                     val dy = worldY - sample.worldY
                     val distanceSquared = (dx * dx + dy * dy).toDouble()
-                        .coerceAtLeast(0.0025)
-                    val weight = 1.0 / distanceSquared
+                    nearestDistanceSquared = min(nearestDistanceSquared, distanceSquared)
+                    val weight = 1.0 / distanceSquared.coerceAtLeast(MIN_DISTANCE_SQUARED)
                     weightedRssi += sample.rssiDbm * weight
                     weightSum += weight
                 }
-                pixels[gridY * gridWidth + gridX] =
-                    rssiColor((weightedRssi / weightSum).toFloat())
+                if (nearestDistanceSquared <= supportDistanceSquared && weightSum > 0.0) {
+                    pixels[gridY * gridWidth + gridX] =
+                        rssiColor((weightedRssi / weightSum).toFloat())
+                }
             }
         }
 
         val coarse = Bitmap.createBitmap(
-            pixels, gridWidth, gridHeight, Bitmap.Config.ARGB_8888
+            pixels,
+            gridWidth,
+            gridHeight,
+            Bitmap.Config.ARGB_8888
         )
         val output = Bitmap.createBitmap(
-            geometry.widthPx, geometry.heightPx, Bitmap.Config.ARGB_8888
+            geometry.widthPx,
+            geometry.heightPx,
+            Bitmap.Config.ARGB_8888
         )
         val canvas = Canvas(output)
         val clip = Path().apply {
@@ -109,13 +138,13 @@ object HeatMapRenderer {
                 fun channel(low: Int, high: Int): Int =
                     (low + (high - low) * fraction).toInt().coerceIn(0, 255)
                 return Color.argb(
-                    210,
+                    LAYER_ALPHA,
                     channel(Color.red(lowColor), Color.red(highColor)),
                     channel(Color.green(lowColor), Color.green(highColor)),
                     channel(Color.blue(lowColor), Color.blue(highColor))
                 )
             }
         }
-        return Color.argb(210, 225, 45, 35)
+        return Color.argb(LAYER_ALPHA, 225, 45, 35)
     }
 }

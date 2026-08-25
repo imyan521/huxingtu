@@ -10,7 +10,7 @@ import kotlin.math.atan2
 import kotlin.math.hypot
 import kotlin.math.min
 
-/** Adds readable dimensions without changing the native SLAM pixel frame. */
+/** Adds dimensions to a transparent floor-plan layer without changing its frame. */
 object FloorPlanDimensionOverlayRenderer {
     private const val MIN_EDGE_METERS = 1.5f
 
@@ -60,32 +60,6 @@ object FloorPlanDimensionOverlayRenderer {
                 Math.toDegrees(atan2(dy, dx).toDouble()).toFloat(),
                 String.format(Locale.US, "%.2f m", meters),
                 textPaint,
-                backgroundPaint
-            )
-        }
-
-        val length = generation.dimensionLongSizePixels * metersPerPixel
-        val width = generation.dimensionShortSizePixels * metersPerPixel
-        val area = generation.footprintAreaPixelsSquared *
-            metersPerPixel * metersPerPixel
-        if (length.isFinite() && width.isFinite() && area.isFinite()) {
-            val summary = String.format(
-                Locale.US,
-                "长 %.2f m　宽 %.2f m　面积 %.2f m²",
-                length,
-                width,
-                area
-            )
-            val summaryPaint = Paint(textPaint).apply {
-                this.textSize = (textPaint.textSize * 1.05f).coerceAtMost(26f)
-            }
-            drawLabel(
-                canvas,
-                output.width * 0.5f,
-                summaryPaint.textSize * 1.35f,
-                0f,
-                summary,
-                summaryPaint,
                 backgroundPaint
             )
         }

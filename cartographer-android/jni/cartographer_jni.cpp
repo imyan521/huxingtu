@@ -679,7 +679,13 @@ CartographerNativeGetActiveSubmapTextures(
             }
         }
         std::sort(active_ids.begin(), active_ids.end());
-        const size_t first = active_ids.size() > 2 ? active_ids.size() - 2 : 0;
+        // Include the just-finished predecessor as well as the two actively
+        // receiving submaps. This lets the incremental display archive its
+        // final texture without querying every historical submap.
+        constexpr size_t kLiveDisplaySubmapCount = 3;
+        const size_t first = active_ids.size() > kLiveDisplaySubmapCount
+                ? active_ids.size() - kLiveDisplaySubmapCount
+                : 0;
         for (size_t index = first; index < active_ids.size(); ++index) {
             active_submaps.push_back(SubmapMetadata{
                     active_ids[index],

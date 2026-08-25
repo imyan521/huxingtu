@@ -7834,10 +7834,9 @@ PipelineResult RunPipeline(const std::string& input_path,
             throw std::runtime_error("Unable to write recomposed floor-plan image");
         }
 
-        // Keep the architectural annotations as an independent transparent
-        // layer in the native SLAM pixel frame. Android draws this bitmap with
-        // the exact same transform as the fused occupancy bitmap, allowing the
-        // point cloud, heat map and floor plan to be toggled independently.
+        // Export architectural annotations independently in the same native
+        // SLAM pixel frame. Android can then toggle this layer without an
+        // opaque presentation bitmap hiding the heat map or trajectory.
         cv::Mat floorplan_overlay(
                 internal_mask.size(), CV_8UC4, cv::Scalar(0, 0, 0, 0));
         floorplan_overlay.setTo(
