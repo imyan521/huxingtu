@@ -154,6 +154,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
     private var pendingLegacyMapExport: File? = null
     private val measurementTextures = LinkedHashMap<String, SubmapTexture>()
     private var continueBaseSubmaps: List<SubmapTexture> = emptyList()
+    private var finalizedSubmaps: List<SubmapTexture> = emptyList()
     private var currentMapMeasurement: MapMeasurement? = null
     private var measurementGeneration = 0L
     private var isMeasurementCalculationRunning = false
@@ -333,7 +334,10 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
             continueSourceMapFile = null
             rssiSamples.clear()
             lastRssiSampleMs = 0L
+        } else if (mappingMode == MappingMode.CONTINUE_MAPPING) {
+            mapView.beginContinueMapping()
         }
+        finalizedSubmaps = emptyList()
         clearFloorPlanLayers()
         mapView.resetToRobotFollowing()
         btnMapNorth.visibility = View.GONE
@@ -413,12 +417,16 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                         return@Thread
                     }
                     val oldSubmaps = carto.getSubmapTextures()
+                    // At this point no active trajectory exists, so this returns
+                    // the paths restored from the frozen pbstream state.
+                    val oldTrajectory = carto.getTrajectoryNodePoses()
                     loadedMapNorthAlignment = MapMetadataStore.load(mapToLoad)
                     pendingNorthAlignment = loadedMapNorthAlignment
                     runOnUiThread {
                         continueBaseSubmaps = oldSubmaps
                         latestSubmapCount = oldSubmaps.size
                         mapView.setSubmapTextures(oldSubmaps)
+                        mapView.setBaseTrajectory(oldTrajectory)
                         // Map measurement/floor-plan geometry is not needed for
                         // relocalization and can be expensive on a large frozen
                         // map. Recompute it once matching succeeds.
@@ -618,8 +626,10 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         val h = Handler(Looper.getMainLooper())
         h.post(object : Runnable {
             override fun run() {
-                val pose = carto.getCurrentPose()
-                val status = carto.getStatus()
+                // Final optimization owns Cartographer's data mutex for a
+                // potentially long time. Never make the main thread wait for it.
+                val pose = if (!isFinishingMapping) carto.getCurrentPose() else null
+                val status = if (!isFinishingMapping) carto.getStatus() else SlamStatus()
                 val magneticState = magneticHeadingProvider.getState()
                 val nowMs = SystemClock.elapsedRealtime()
                 updateSlamTiming(status, nowMs)
@@ -966,6 +976,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                     ?: calculateMapNorthAlignment(finishHeading, finalPose)
                 val optimizedSubmaps = carto.getSubmapTextures()
                 val optimizedTrajectory = carto.getTrajectoryNodePoses()
+                finalizedSubmaps = optimizedSubmaps
                 isMappingRunning = false
                 isMappingFinished = true
                 runOnUiThread {
@@ -1007,6 +1018,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         }
 
         btnSaveMap.isEnabled = false
+        show("正在保存地图并生成户型图，请稍候…")
         Thread {
             val mapDir = File(filesDir, "maps")
             if (!mapDir.exists()) mapDir.mkdirs()
@@ -1059,20 +1071,9 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                 }
             }
 
-            val finalizedTextures = try {
-                carto.getSubmapTextures()
-            } catch (e: Exception) {
-                Log.e("CartographerJNI", "获取最终融合地图失败", e)
-                emptyList()
-            }
-            if (finalizedTextures.isNotEmpty()) {
-                // Switch the main map as soon as the saved submaps are ready.
-                // Floor-plan reconstruction can take noticeably longer and
-                // must not delay the finalized black occupancy presentation.
-                runOnUiThread {
-                    mapView.setFinalizedSubmapTextures(finalizedTextures)
-                }
-            }
+            // finishMapping already extracted the complete optimized texture set.
+            // Reusing it avoids holding two full JNI pixel copies in memory.
+            val finalizedTextures = finalizedSubmaps
 
             val floorPlanOutput = try {
                 exportFloorPlanMaps(timestamp, finalizedTextures)
@@ -1090,6 +1091,12 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
 
             runOnUiThread {
                 btnSaveMap.isEnabled = true
+                // Start the on-screen final fusion only after export/generation
+                // has released its large temporary grids and bitmaps. Running
+                // both fusions concurrently can exhaust memory on supplement maps.
+                if (finalizedTextures.isNotEmpty()) {
+                    mapView.setFinalizedSubmapTextures(finalizedTextures)
+                }
                 val floorPlanText = updateCurrentFloorPlan(floorPlanOutput, floorPlanResult)
                 val mapText = if (ok) {
                     when {

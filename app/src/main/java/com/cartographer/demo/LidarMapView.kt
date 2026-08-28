@@ -36,6 +36,7 @@ class LidarMapView @JvmOverloads constructor(
     }
 
     private val trajectory = ArrayDeque<PointF>()
+    private val baseTrajectory = ArrayList<PointF>()
     private val optimizedTrajectory = ArrayList<PointF>()
     private val liveScanPoints = ArrayList<PointF>(720)
     private var liveScanTimestampNs = 0L
@@ -333,6 +334,22 @@ class LidarMapView @JvmOverloads constructor(
         invalidate()
     }
 
+    /** Keeps the loaded-map path separate from points collected in this session. */
+    fun setBaseTrajectory(points: List<PointF>) {
+        baseTrajectory.clear()
+        baseTrajectory.addAll(points)
+        invalidate()
+    }
+
+    /** Starts a supplement session without discarding the loaded map or its path. */
+    fun beginContinueMapping() {
+        trajectory.clear()
+        optimizedTrajectory.clear()
+        liveScanPoints.clear()
+        liveScanTimestampNs = 0L
+        invalidate()
+    }
+
     fun setMapMeasurement(measurement: MapMeasurement?) {
         mapMeasurement = measurement
         invalidate()
@@ -396,6 +413,7 @@ class LidarMapView @JvmOverloads constructor(
 
     fun clearMap() {
         trajectory.clear()
+        baseTrajectory.clear()
         optimizedTrajectory.clear()
         liveScanPoints.clear()
         liveScanTimestampNs = 0L
@@ -485,26 +503,10 @@ class LidarMapView @JvmOverloads constructor(
                 drawLiveScan(canvas, centerX, centerY, scale)
             }
 
-            val pathPoints: Iterable<PointF> =
+            drawTrajectory(canvas, baseTrajectory, centerX, centerY, scale, 135)
+            val currentPath: Collection<PointF> =
                 if (optimizedTrajectory.size > 1) optimizedTrajectory else trajectory
-            val pathSize = (pathPoints as? Collection<PointF>)?.size ?: trajectory.size
-            if (pathSize > 1) {
-                val referenceX = currentReferenceX()
-                val referenceY = currentReferenceY()
-                trajectoryPath.reset()
-                var first = true
-                for (point in pathPoints) {
-                    val x = centerX + (point.x - referenceX) * scale
-                    val y = centerY - (point.y - referenceY) * scale
-                    if (first) {
-                        trajectoryPath.moveTo(x, y)
-                        first = false
-                    } else {
-                        trajectoryPath.lineTo(x, y)
-                    }
-                }
-                canvas.drawPath(trajectoryPath, pathPaint)
-            }
+            drawTrajectory(canvas, currentPath, centerX, centerY, scale, 255)
 
             val robotX = centerX + (latestPose.x.toFloat() - currentReferenceX()) * scale
             val robotY = centerY - (latestPose.y.toFloat() - currentReferenceY()) * scale
@@ -518,6 +520,35 @@ class LidarMapView @JvmOverloads constructor(
             )
         }
         canvas.restore()
+    }
+
+    private fun drawTrajectory(
+        canvas: Canvas,
+        points: Collection<PointF>,
+        centerX: Float,
+        centerY: Float,
+        scale: Float,
+        alpha: Int
+    ) {
+        if (points.size <= 1) return
+        val referenceX = currentReferenceX()
+        val referenceY = currentReferenceY()
+        trajectoryPath.reset()
+        var first = true
+        for (point in points) {
+            val x = centerX + (point.x - referenceX) * scale
+            val y = centerY - (point.y - referenceY) * scale
+            if (first) {
+                trajectoryPath.moveTo(x, y)
+                first = false
+            } else {
+                trajectoryPath.lineTo(x, y)
+            }
+        }
+        val previousAlpha = pathPaint.alpha
+        pathPaint.alpha = alpha
+        canvas.drawPath(trajectoryPath, pathPaint)
+        pathPaint.alpha = previousAlpha
     }
 
     private fun currentMapRotationDegrees(): Float {
