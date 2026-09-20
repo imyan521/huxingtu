@@ -68,6 +68,84 @@ double SegmentLength(const cv::Vec4i& seg) {
     return std::hypot(seg[2] - seg[0], seg[3] - seg[1]);
 }
 
+// Return only the exterior-outline runs farther than 1.5 m from the complete
+// trajectory polyline. Sampling each straight outline edge at <= 1 pixel
+// keeps the red/green transition local instead of recoloring an entire edge.
+std::vector<cv::Vec4i> DistantOutlineRuns(
+        const std::vector<cv::Point>& outline,
+        const std::vector<cv::Point2f>& trajectory,
+        double meters_per_pixel) {
+    std::vector<cv::Vec4i> runs;
+    if (outline.size() < 3 || trajectory.size() < 2 ||
+        !std::isfinite(meters_per_pixel) || meters_per_pixel <= 0.0) {
+        return runs;
+    }
+    const double limit = 1.5 / meters_per_pixel;
+    const double limit_squared = limit * limit;
+    auto is_distant = [&](const cv::Point2d& point) {
+        for (size_t index = 1; index < trajectory.size(); ++index) {
+            const cv::Point2f& first = trajectory[index - 1];
+            const cv::Point2f& second = trajectory[index];
+            if (!std::isfinite(first.x) || !std::isfinite(first.y) ||
+                !std::isfinite(second.x) || !std::isfinite(second.y) ||
+                point.x < std::min(first.x, second.x) - limit ||
+                point.x > std::max(first.x, second.x) + limit ||
+                point.y < std::min(first.y, second.y) - limit ||
+                point.y > std::max(first.y, second.y) + limit) {
+                continue;
+            }
+            const cv::Point2d start(first.x, first.y);
+            const cv::Point2d delta(second.x - first.x, second.y - first.y);
+            const double length_squared = delta.dot(delta);
+            const double fraction = length_squared > 0.0
+                    ? std::clamp((point - start).dot(delta) / length_squared,
+                                 0.0, 1.0)
+                    : 0.0;
+            const cv::Point2d difference = point - (start + fraction * delta);
+            if (difference.dot(difference) <= limit_squared) return false;
+        }
+        return true;
+    };
+
+    for (size_t edge = 0; edge < outline.size(); ++edge) {
+        const cv::Point start = outline[edge];
+        const cv::Point end = outline[(edge + 1) % outline.size()];
+        const cv::Point2d delta(end.x - start.x, end.y - start.y);
+        const int steps = std::max(1, static_cast<int>(std::ceil(cv::norm(delta))));
+        int run_start = -1;
+        auto point_at = [&](int step) {
+            const double fraction = static_cast<double>(step) / steps;
+            return cv::Point(
+                    cvRound(start.x + delta.x * fraction),
+                    cvRound(start.y + delta.y * fraction));
+        };
+        for (int step = 0; step < steps; ++step) {
+            const double fraction = (step + 0.5) / steps;
+            const cv::Point2d midpoint = cv::Point2d(start) + fraction * delta;
+            const bool distant = is_distant(midpoint);
+            if (distant && run_start < 0) run_start = step;
+            if (run_start >= 0 && (!distant || step == steps - 1)) {
+                const cv::Point first = point_at(run_start);
+                const cv::Point last = point_at(distant ? step + 1 : step);
+                runs.emplace_back(first.x, first.y, last.x, last.y);
+                run_start = -1;
+            }
+        }
+    }
+    return runs;
+}
+
+void DrawDistantOutlineRuns(cv::Mat& image,
+                            const std::vector<cv::Vec4i>& runs) {
+    const cv::Scalar red = image.channels() == 4
+            ? cv::Scalar(0, 0, 255, 255)
+            : cv::Scalar(0, 0, 255);
+    for (const cv::Vec4i& run : runs) {
+        cv::line(image, {run[0], run[1]}, {run[2], run[3]},
+                 red, 2, cv::LINE_AA);
+    }
+}
+
 double LineAngle(const cv::Vec4i& seg) {
     double angle = std::atan2(seg[3] - seg[1], seg[2] - seg[0]) * 180.0 / kPi;
     angle = std::fmod(angle, 180.0);
@@ -999,6 +1077,148 @@ double ProjectionOverlapRatio(const cv::Vec4i& first, const cv::Vec4i& second) {
             1.0,
             std::min(first_span[1] - first_span[0],
                      second_span[1] - second_span[0]));
+}
+
+// Recovery passes can reintroduce the two observed faces of one partition
+// after earlier deduplication. Consolidate only genuinely overlapping runs;
+// collinear runs separated by a doorway must remain separate.
+std::vector<cv::Vec4i> ConsolidateParallelInternalWalls(
+        const std::vector<cv::Vec4i>& segments,
+        double meters_per_pixel,
+        const cv::Mat& semantic_map,
+        int* merge_count) {
+    if (merge_count != nullptr) *merge_count = 0;
+    if (segments.size() < 2 || !std::isfinite(meters_per_pixel) ||
+        meters_per_pixel <= 0.0) {
+        return segments;
+    }
+    constexpr double kMaximumAngleDegrees = 6.0;
+    constexpr double kMinimumOverlapRatio = 0.60;
+    const double maximum_offset = 0.25 / meters_per_pixel;
+    const double minimum_free_strip_width = 0.12 / meters_per_pixel;
+    cv::Mat semantic_free;
+    if (!semantic_map.empty() && semantic_map.type() == CV_8UC3) {
+        cv::inRange(semantic_map,
+                    cv::Scalar(245, 245, 245),
+                    cv::Scalar(255, 255, 255),
+                    semantic_free);
+    }
+
+    struct Group {
+        cv::Vec4i center;
+        cv::Point2d direction;
+        double minimum_offset;
+        double maximum_offset;
+        double offset_sum;
+        int count;
+    };
+    std::vector<cv::Vec4i> ordered = segments;
+    std::stable_sort(ordered.begin(), ordered.end(),
+                     [](const cv::Vec4i& first, const cv::Vec4i& second) {
+                         return SegmentLength(first) > SegmentLength(second);
+                     });
+    std::vector<Group> groups;
+    groups.reserve(ordered.size());
+    for (const cv::Vec4i& candidate : ordered) {
+        bool merged = false;
+        for (Group& group : groups) {
+            if (AngleDistance(LineAngle(candidate),
+                              LineAngle(group.center)) >
+                kMaximumAngleDegrees) {
+                continue;
+            }
+            const cv::Point2d normal(-group.direction.y, group.direction.x);
+            auto span = [&](const cv::Vec4i& segment) {
+                std::array<double, 2> result{{
+                        cv::Point2d(segment[0], segment[1]).dot(
+                                group.direction),
+                        cv::Point2d(segment[2], segment[3]).dot(
+                                group.direction)}};
+                std::sort(result.begin(), result.end());
+                return result;
+            };
+            const double offset = 0.5 * (
+                    cv::Point2d(candidate[0], candidate[1]).dot(normal) +
+                    cv::Point2d(candidate[2], candidate[3]).dot(normal));
+            // Guard against chain merging: every face in one group must fit
+            // within the same 0.25 m wall band, not just near its mean.
+            if (std::max(group.maximum_offset, offset) -
+                    std::min(group.minimum_offset, offset) > maximum_offset) {
+                continue;
+            }
+            const auto retained_span = span(group.center);
+            const auto candidate_span = span(candidate);
+            const double overlap_start = std::max(
+                    retained_span[0], candidate_span[0]);
+            const double overlap_end = std::min(
+                    retained_span[1], candidate_span[1]);
+            const double shorter_span = std::min(
+                    retained_span[1] - retained_span[0],
+                    candidate_span[1] - candidate_span[0]);
+            if (shorter_span <= 0.0 ||
+                (overlap_end - overlap_start) / shorter_span <
+                    kMinimumOverlapRatio) {
+                continue;
+            }
+
+            // A consistently explored free strip is evidence of two distinct
+            // nearby walls, even if their fitted red lines are close.
+            const double mean_offset = group.offset_sum / group.count;
+            if (!semantic_free.empty() &&
+                std::fabs(offset - mean_offset) >= minimum_free_strip_width) {
+                int free_cross_sections = 0;
+                constexpr int kSamples = 7;
+                for (int sample = 0; sample < kSamples; ++sample) {
+                    const double position = overlap_start +
+                            (sample + 0.5) *
+                            (overlap_end - overlap_start) / kSamples;
+                    int free_across_width = 0;
+                    for (const double fraction : {0.25, 0.50, 0.75}) {
+                        const cv::Point2d point =
+                                group.direction * position +
+                                normal * (mean_offset +
+                                          fraction * (offset - mean_offset));
+                        const int x = cvRound(point.x);
+                        const int y = cvRound(point.y);
+                        if (x >= 0 && x < semantic_free.cols &&
+                            y >= 0 && y < semantic_free.rows &&
+                            semantic_free.at<uchar>(y, x) != 0) {
+                            ++free_across_width;
+                        }
+                    }
+                    free_cross_sections += free_across_width == 3 ? 1 : 0;
+                }
+                if (free_cross_sections >= 6) continue;
+            }
+
+            group.minimum_offset = std::min(group.minimum_offset, offset);
+            group.maximum_offset = std::max(group.maximum_offset, offset);
+            group.offset_sum += offset;
+            ++group.count;
+            group.center = BuildSegment(
+                    std::min(retained_span[0], candidate_span[0]),
+                    std::max(retained_span[1], candidate_span[1]),
+                    group.offset_sum / group.count,
+                    group.direction);
+            if (merge_count != nullptr) ++*merge_count;
+            merged = true;
+            break;
+        }
+        if (!merged) {
+            const cv::Point2d direction =
+                    DirectionFromAngle(LineAngle(candidate));
+            const cv::Point2d normal(-direction.y, direction.x);
+            const double offset = 0.5 * (
+                    cv::Point2d(candidate[0], candidate[1]).dot(normal) +
+                    cv::Point2d(candidate[2], candidate[3]).dot(normal));
+            groups.push_back({candidate, direction, offset, offset,
+                              offset, 1});
+        }
+    }
+    std::vector<cv::Vec4i> result;
+    result.reserve(groups.size());
+    for (const Group& group : groups) result.push_back(group.center);
+    return result;
 }
 
 std::vector<cv::Vec4i> TraceSkeletonSegments(
@@ -7017,6 +7237,19 @@ static PipelineResult FitFloorPlan(const std::string& clean_map_path,
                   << final_facade_segments_removed << "\n";
     }
 
+    // Do this after all topology/semantic recovery passes: otherwise those
+    // passes can add a second face back after an earlier centerline merge.
+    // Doorway detection and carving below still act on the consolidated wall.
+    int final_parallel_wall_merges = 0;
+    internal_wall_segments = ConsolidateParallelInternalWalls(
+            internal_wall_segments, meters_per_pixel, semantic_map,
+            &final_parallel_wall_merges);
+    if (final_parallel_wall_merges > 0) {
+        std::cout << "[INFO] 最终内墙双线合并="
+                  << final_parallel_wall_merges
+                  << " remaining=" << internal_wall_segments.size() << "\n";
+    }
+
     // Every recovery stage above works on architectural wall runs and may
     // deliberately bridge a short unsupported interval.  That is correct for
     // scan dropouts, but it can also close a real doorway after the initial
@@ -8055,13 +8288,16 @@ PipelineResult RunPipeline(const std::string& input_path,
                         : options.visual_input_path;
         cv::Mat recomposed = cv::imread(
                 presentation_input, cv::IMREAD_COLOR);
+        cv::Mat semantic = cv::imread(
+                options.semantic_input_path, cv::IMREAD_COLOR);
         cv::Mat internal_mask = cv::imread(
                 PathJoin(best.debug_dir, "internal_annotation_mask.png"),
                 cv::IMREAD_GRAYSCALE);
-        if (recomposed.empty() || internal_mask.empty() ||
-            recomposed.size() != internal_mask.size()) {
+        if (recomposed.empty() || semantic.empty() || internal_mask.empty() ||
+            recomposed.size() != internal_mask.size() ||
+            recomposed.size() != semantic.size()) {
             throw std::runtime_error(
-                    "Unable to load selected branch annotation mask");
+                    "Unable to load final floor-plan composition inputs");
         }
         std::vector<cv::Point> outline_polygon;
         outline_polygon.reserve(outline_choice->outline_polygon_px.size());
@@ -8076,6 +8312,22 @@ PipelineResult RunPipeline(const std::string& input_path,
                 std::vector<std::vector<cv::Point>>{outline_polygon},
                 cv::Scalar(255));
         cv::bitwise_and(internal_mask, footprint, internal_mask);
+        // Only the final, savable floor-plan PNG uses a white background. The
+        // semantic raster identifies unknown background exactly, so gray wall
+        // evidence in the visual raster is not accidentally erased.
+        cv::Mat unknown_background;
+        cv::inRange(
+                semantic,
+                cv::Scalar(154, 154, 154),
+                cv::Scalar(154, 154, 154),
+                unknown_background);
+        cv::Mat outside_footprint;
+        cv::bitwise_not(footprint, outside_footprint);
+        cv::bitwise_or(
+                unknown_background,
+                outside_footprint,
+                unknown_background);
+        recomposed.setTo(cv::Scalar(255, 255, 255), unknown_background);
         recomposed.setTo(cv::Scalar(0, 0, 255), internal_mask);
         cv::polylines(
                 recomposed,
@@ -8084,6 +8336,11 @@ PipelineResult RunPipeline(const std::string& input_path,
                 cv::Scalar(0, 255, 0),
                 2,
                 cv::LINE_AA);
+        const auto distant_outline_runs = DistantOutlineRuns(
+                outline_polygon,
+                options.trajectory_points_px,
+                options.meters_per_pixel);
+        DrawDistantOutlineRuns(recomposed, distant_outline_runs);
         if (!cv::imwrite(output_path, recomposed)) {
             throw std::runtime_error("Unable to write recomposed floor-plan image");
         }
@@ -8102,6 +8359,7 @@ PipelineResult RunPipeline(const std::string& input_path,
                 cv::Scalar(0, 255, 0, 255),
                 2,
                 cv::LINE_AA);
+        DrawDistantOutlineRuns(floorplan_overlay, distant_outline_runs);
         const std::string floorplan_overlay_path =
                 PathJoin(actual_work_dir, "floorplan_overlay.png");
         if (!cv::imwrite(floorplan_overlay_path, floorplan_overlay)) {
