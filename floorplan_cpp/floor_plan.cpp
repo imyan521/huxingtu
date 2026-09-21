@@ -1079,6 +1079,38 @@ double ProjectionOverlapRatio(const cv::Vec4i& first, const cv::Vec4i& second) {
                      second_span[1] - second_span[0]));
 }
 
+double MappingCoveragePercent(
+        const cv::Mat& semantic_map,
+        const std::vector<cv::Point2f>& outline_polygon) {
+    if (semantic_map.empty() || semantic_map.type() != CV_8UC3 ||
+        outline_polygon.size() < 3) {
+        return -1.0;
+    }
+    std::vector<cv::Point> vertices;
+    vertices.reserve(outline_polygon.size());
+    for (const cv::Point2f& point : outline_polygon) {
+        if (!std::isfinite(point.x) || !std::isfinite(point.y)) return -1.0;
+        vertices.emplace_back(cvRound(point.x), cvRound(point.y));
+    }
+    cv::Mat footprint = cv::Mat::zeros(semantic_map.size(), CV_8UC1);
+    cv::fillPoly(footprint,
+                 std::vector<std::vector<cv::Point>>{vertices},
+                 cv::Scalar(255));
+    const int total_cells = cv::countNonZero(footprint);
+    if (total_cells == 0) return -1.0;
+
+    // Use the original semantic raster, never the presentation PNG: its
+    // unknown cells are painted white for the final report but remain unknown.
+    cv::Mat unknown_cells;
+    cv::inRange(semantic_map,
+                cv::Scalar(154, 154, 154),
+                cv::Scalar(154, 154, 154),
+                unknown_cells);
+    cv::bitwise_and(unknown_cells, footprint, unknown_cells);
+    const int known_cells = total_cells - cv::countNonZero(unknown_cells);
+    return 100.0 * known_cells / total_cells;
+}
+
 // Recovery passes can reintroduce the two observed faces of one partition
 // after earlier deduplication. Consolidate only genuinely overlapping runs;
 // collinear runs separated by a doorway must remain separate.
@@ -7499,10 +7531,10 @@ static PipelineResult FitFloorPlan(const std::string& clean_map_path,
     cv::imwrite(
             PathJoin(debug_dir, "wall_only_visual_mask.png"),
             wall_only_binary);
-    // Keep the complete Cartographer occupancy image as both the report base
-    // and a diagnostic artifact.  Do not gray pixels outside the fitted
-    // polygon: users need to compare the red/green reconstruction against all
-    // original black observations.
+    // Preserve the complete Cartographer occupancy image as a diagnostic
+    // artifact, but clip the report base to the fitted exterior footprint.
+    // This also covers the non-auto-branch path; the auto-branch final
+    // compositor applies the selected footprint separately below.
     cv::Mat rendered = original_map.clone();
     if (rendered.empty()) {
         rendered = cv::Mat(
@@ -7515,12 +7547,14 @@ static PipelineResult FitFloorPlan(const std::string& clean_map_path,
             fs::path(output_path).parent_path().string(),
             "raw_occupancy_unclipped.png");
     cv::imwrite(raw_diagnostic_path, rendered);
-    // Keep the legacy filename for Android compatibility; its content is now
-    // intentionally the full, unclipped occupancy raster.
+    // Keep the legacy diagnostic filename for Android compatibility.
     cv::imwrite(
             PathJoin(fs::path(output_path).parent_path().string(),
                      "occupancy_clipped.png"),
             rendered);
+    cv::Mat outside_footprint;
+    cv::bitwise_not(footprint_mask, outside_footprint);
+    rendered.setTo(cv::Scalar(255, 255, 255), outside_footprint);
     const int internal_line_thickness = std::clamp(
             static_cast<int>(std::round(
                     0.06 / std::max(
@@ -8447,6 +8481,14 @@ PipelineResult RunPipeline(const std::string& input_path,
                   << " outline_branch=" << outline_choice->branch
                   << " score=" << std::fixed << std::setprecision(2) << best.score
                   << std::defaultfloat << "\n";
+    }
+    best.mapping_coverage_percent = MappingCoveragePercent(
+            cv::imread(options.semantic_input_path, cv::IMREAD_COLOR),
+            best.outline_polygon_px);
+    if (best.mapping_coverage_percent >= 0.0) {
+        std::cout << "[INFO] 建图覆盖率=" << std::fixed
+                  << std::setprecision(1) << best.mapping_coverage_percent
+                  << "%" << std::defaultfloat << "\n";
     }
     std::cout << "[INFO] 端到端处理完成: " << output_path << "\n";
     return best;

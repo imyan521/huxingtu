@@ -609,6 +609,7 @@ class CartographerSdk private constructor(
                 supportRatio = generation.supportRatio,
                 footprintPerimeterMeters = generation.footprintPerimeterPixels *
                     geometry.resolutionMetersPerPixel,
+                mappingCoveragePercent = generation.mappingCoveragePercent,
                 geometry = RasterGeometry(
                     resolutionMetersPerPixel = geometry.resolutionMetersPerPixel,
                     worldMinX = geometry.worldMinX,
@@ -786,6 +787,14 @@ data class FloorPlanDimensions(
         areaSquareMeters.isFinite() && areaSquareMeters > 0f
 }
 
+/**
+ * Final floor-plan result returned by [CartographerSdk.generateFloorPlan].
+ *
+ * [mappingCoveragePercent] is the percentage of known (free or occupied)
+ * semantic-map cells inside the fitted exterior outline. Unknown cells are
+ * excluded from the numerator even when the exported PNG paints them white.
+ * It is in the range 0..100, or null when coverage cannot be calculated.
+ */
 data class FinalFloorPlan(
     val imageFile: File,
     val structuralMapFile: File?,
@@ -797,7 +806,8 @@ data class FinalFloorPlan(
     val rotationDegrees: Float,
     val supportRatio: Float,
     val footprintPerimeterMeters: Float,
-    val geometry: RasterGeometry
+    val geometry: RasterGeometry,
+    val mappingCoveragePercent: Float? = null
 )
 
 data class RelocalizationStatus(

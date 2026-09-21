@@ -79,6 +79,7 @@ object FloorPlanImageAnnotator {
                 lengthMeters,
                 widthMeters,
                 area,
+                generation.mappingCoveragePercent,
                 metersPerPixel
             )
             annotated = annotatedBitmap
@@ -118,7 +119,11 @@ object FloorPlanImageAnnotator {
      * small raster gaps, keep the largest wall component, take its convex hull,
      * and fit the minimum-area rectangle to that outside evidence.
      */
-    fun annotateFallbackFile(file: File, metersPerPixel: Float): Result {
+    fun annotateFallbackFile(
+        file: File,
+        metersPerPixel: Float,
+        mappingCoveragePercent: Float? = null
+    ): Result {
         if (!file.exists() || !metersPerPixel.isFinite() || metersPerPixel <= 0f) {
             return Result(false, "户型图兜底输入无效")
         }
@@ -210,7 +215,8 @@ object FloorPlanImageAnnotator {
                 dimensionShortSizePixels = fitted.shortSize,
                 outlineVerticesPixels = vertices,
                 footprintAreaPixelsSquared = fitted.longSize * fitted.shortSize,
-                footprintPerimeterPixels = 2f * (fitted.longSize + fitted.shortSize)
+                footprintPerimeterPixels = 2f * (fitted.longSize + fitted.shortSize),
+                mappingCoveragePercent = mappingCoveragePercent
             )
             annotateFile(file, generation, metersPerPixel)
         } catch (_: OutOfMemoryError) {
@@ -493,7 +499,10 @@ object FloorPlanImageAnnotator {
             val height = ceil(rotatedBottom - rotatedTop).toInt().coerceAtLeast(1)
             canonical = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
             Canvas(canonical).apply {
-                drawColor(source.getPixel(0, 0))
+                // Rotation exposes new canvas corners outside the raster.
+                // The final report uses white there, regardless of the input
+                // raster's corner pixel or any unclipped scan returns.
+                drawColor(Color.WHITE)
                 translate(-rotatedLeft, -rotatedTop)
                 rotate(correctionDegrees, centerX, centerY)
                 drawBitmap(source, 0f, 0f, null)
@@ -635,13 +644,17 @@ object FloorPlanImageAnnotator {
         lengthMeters: Float,
         widthMeters: Float,
         areaSquareMeters: Float,
+        mappingCoveragePercent: Float?,
         metersPerPixel: Float
     ): Bitmap {
         val shortSide = min(source.width, source.height).toFloat().coerceAtLeast(1f)
         // Compact report style: small labels sit directly beside the green
         // contour instead of surrounding the plan with large dimension lines.
         val textSize = (shortSide * 0.022f).coerceIn(9f, 24f)
-        val summaryHeight = textSize * 1.9f
+        val coverageText = mappingCoveragePercent
+            ?.takeIf { it.isFinite() && it in 0f..100f }
+            ?.let { String.format(Locale.US, "建图覆盖率：%.1f%%", it) }
+        val summaryHeight = textSize * (if (coverageText == null) 1.9f else 3.2f)
         val dimensionMargin = (textSize * 2.0f).coerceIn(22f, 64f)
         val outerPadding = max(10f, textSize * 0.45f)
 
@@ -658,7 +671,10 @@ object FloorPlanImageAnnotator {
             textAlign = Paint.Align.CENTER
             style = Paint.Style.FILL
         }
-        val requiredSummaryWidth = summaryPaint.measureText(summary) + outerPadding * 2f
+        val requiredSummaryWidth = max(
+            summaryPaint.measureText(summary),
+            coverageText?.let { summaryPaint.measureText(it) } ?: 0f
+        ) + outerPadding * 2f
         val contentWidth = max(source.width.toFloat(), requiredSummaryWidth)
         val outputWidth = ceil(contentWidth + dimensionMargin * 2f).toInt()
         val outputHeight = ceil(summaryHeight + source.height + dimensionMargin * 2f).toInt()
@@ -696,9 +712,16 @@ object FloorPlanImageAnnotator {
         canvas.drawRect(0f, 0f, output.width.toFloat(), summaryHeight, headerPaint)
         canvas.drawLine(0f, summaryHeight, output.width.toFloat(), summaryHeight, guidePaint)
         val summaryMetrics = summaryPaint.fontMetrics
-        val summaryBaseline = summaryHeight * 0.5f -
+        val summaryBaseline = summaryHeight *
+            (if (coverageText == null) 0.5f else 0.33f) -
             (summaryMetrics.ascent + summaryMetrics.descent) * 0.5f
         canvas.drawText(summary, output.width * 0.5f, summaryBaseline, summaryPaint)
+        if (coverageText != null) {
+            val coverageBaseline = summaryHeight * 0.72f -
+                (summaryMetrics.ascent + summaryMetrics.descent) * 0.5f
+            canvas.drawText(coverageText, output.width * 0.5f,
+                coverageBaseline, summaryPaint)
+        }
 
         val dimensionOffset = textSize * 0.72f
         var signedAreaTwice = 0f

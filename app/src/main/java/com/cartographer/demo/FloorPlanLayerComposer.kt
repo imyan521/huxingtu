@@ -3,6 +3,7 @@ package com.cartographer.demo
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Path
 
 data class FloorPlanLayers(
     val width: Int,
@@ -10,7 +11,8 @@ data class FloorPlanLayers(
     val pointCloud: Bitmap? = null,
     val heatMap: Bitmap? = null,
     val trajectory: Bitmap? = null,
-    val floorPlan: Bitmap? = null
+    val floorPlan: Bitmap? = null,
+    val pointCloudOutline: List<FloorPlanPixelPoint>? = null
 )
 
 data class FloorPlanLayerVisibility(
@@ -42,7 +44,24 @@ object FloorPlanLayerComposer {
             }
         }
 
-        draw(layers.pointCloud, visibility.pointCloud)
+        val outline = layers.pointCloudOutline?.takeIf { vertices ->
+            vertices.size >= 3 && vertices.all { it.x.isFinite() && it.y.isFinite() }
+        }
+        if (visibility.pointCloud && outline != null) {
+            val clipPath = Path().apply {
+                moveTo(outline[0].x, outline[0].y)
+                for (index in 1 until outline.size) {
+                    lineTo(outline[index].x, outline[index].y)
+                }
+                close()
+            }
+            val checkpoint = canvas.save()
+            canvas.clipPath(clipPath)
+            draw(layers.pointCloud, true)
+            canvas.restoreToCount(checkpoint)
+        } else {
+            draw(layers.pointCloud, visibility.pointCloud)
+        }
         draw(layers.heatMap, visibility.heatMap)
         draw(layers.trajectory, visibility.trajectory)
         draw(layers.floorPlan, visibility.floorPlan)

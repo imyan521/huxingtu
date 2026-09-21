@@ -147,6 +147,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
     @Volatile private var latestSubmapCount = 0
     private var currentFloorPlanResult: File? = null
     private var currentFloorPlanDimensions: FloorPlanDimensions? = null
+    private var currentFloorPlanCoveragePercent: Float? = null
     private var currentFloorPlanWarning: String? = null
     private var floorPlanLayers: FloorPlanLayers? = null
     private var floorPlanDisplayBitmap: Bitmap? = null
@@ -351,6 +352,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         finishedMapPose = null
         currentFloorPlanResult = null
         currentFloorPlanDimensions = null
+        currentFloorPlanCoveragePercent = null
         currentFloorPlanWarning = null
         pendingLegacyFloorPlanSave = null
         pendingLegacyMapExport = null
@@ -1454,7 +1456,8 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
             Log.w("FloorPlan", "户型图尺寸标注失败：${annotation.failureReason}")
             annotation = FloorPlanImageAnnotator.annotateFallbackFile(
                 file = output,
-                metersPerPixel = export.geometry.resolutionMetersPerPixel
+                metersPerPixel = export.geometry.resolutionMetersPerPixel,
+                mappingCoveragePercent = generation.mappingCoveragePercent
             )
         }
         val length = annotation.lengthMeters.takeIf { it.isFinite() && it > 0f }
@@ -1546,7 +1549,9 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
             file = output,
             annotation = annotation,
             dimensions = dimensions,
+            mappingCoveragePercent = generation.mappingCoveragePercent,
             outlineClosed = generation.outlineClosed,
+            outlineVerticesPixels = generation.outlineVerticesPixels,
             sharedMapMeasurement = sharedMapMeasurement,
             structuralMap = File(workDir, "best_structural_map.png")
                 .takeIf { it.exists() },
@@ -1607,6 +1612,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         if (selected == null) {
             currentFloorPlanResult = null
             currentFloorPlanDimensions = null
+            currentFloorPlanCoveragePercent = null
             currentFloorPlanWarning = null
             btnSaveFloorPlan.isEnabled = false
             clearFloorPlanLayers()
@@ -1617,6 +1623,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         val layerExport = export ?: run {
             clearFloorPlanLayers()
             currentFloorPlanResult = null
+            currentFloorPlanCoveragePercent = null
             btnSaveFloorPlan.isEnabled = false
             return "点云图层数据缺失"
         }
@@ -1624,12 +1631,14 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         if (pointCloud == null) {
             clearFloorPlanLayers()
             currentFloorPlanResult = null
+            currentFloorPlanCoveragePercent = null
             btnSaveFloorPlan.isEnabled = false
             return "点云图层解码失败"
         }
 
         currentFloorPlanResult = selected
         currentFloorPlanDimensions = generated?.dimensions ?: layerExport.previewDimensions
+        currentFloorPlanCoveragePercent = generated?.mappingCoveragePercent
         generated?.sharedMapMeasurement?.let { sharedMeasurement ->
             // Invalidate any older asynchronous raster-bounds calculation and
             // drive the map overlay from the same fitted outline used by the
@@ -1651,6 +1660,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                 width = layerExport.geometry.widthPx,
                 height = layerExport.geometry.heightPx,
                 pointCloud = pointCloud,
+                pointCloudOutline = generated?.outlineVerticesPixels,
                 heatMap = generated?.heatMapOverlay?.let {
                     BitmapFactory.decodeFile(it.absolutePath)
                 },
@@ -1670,8 +1680,10 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
             else -> "绿色拟合结果不可用，完整占据栅格图仍可使用原按钮保存"
         }
         val dimensionsText = formatFloorPlanDimensions(currentFloorPlanDimensions)
+        val coverageText = currentFloorPlanCoveragePercent
+            ?.let { "\n${formatMappingCoverage(it)}" }.orEmpty()
         val warningText = currentFloorPlanWarning?.let { "\n$it" }.orEmpty()
-        return "$resultDescription\n$dimensionsText$warningText"
+        return "$resultDescription\n$dimensionsText$coverageText$warningText"
     }
 
     private fun setFloorPlanLayers(layers: FloorPlanLayers) {
@@ -1749,11 +1761,16 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         )
     }
 
+    private fun formatMappingCoverage(percent: Float): String =
+        String.format(Locale.US, "建图覆盖率：%.1f%%", percent)
+
     private fun updateMeasurementDisplay() {
         val mapText = formatMapMeasurement(currentMapMeasurement)
         val floorPlanText = currentFloorPlanDimensions?.let { "\n${formatFloorPlanDimensions(it)}" }
             .orEmpty()
-        tvMapMeasurement.text = mapText + floorPlanText
+        val coverageText = currentFloorPlanCoveragePercent
+            ?.let { "\n${formatMappingCoverage(it)}" }.orEmpty()
+        tvMapMeasurement.text = mapText + floorPlanText + coverageText
     }
 
     private fun saveCurrentFloorPlan() {
@@ -1779,6 +1796,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
             return
         }
         val dimensions = currentFloorPlanDimensions
+        val coveragePercent = currentFloorPlanCoveragePercent
         val warning = currentFloorPlanWarning
         btnSaveFloorPlan.isEnabled = false
         Thread {
@@ -1788,8 +1806,10 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                     btnSaveFloorPlan.isEnabled = currentFloorPlanResult?.exists() == true
                     updateMeasurementDisplay()
                     val dimensionsText = formatFloorPlanDimensions(dimensions)
+                    val coverageText = coveragePercent
+                        ?.let { "\n${formatMappingCoverage(it)}" }.orEmpty()
                     val warningText = warning?.let { "\n注意：$it" }.orEmpty()
-                    show("户型图已保存：$location\n$dimensionsText$warningText")
+                    show("户型图已保存：$location\n$dimensionsText$coverageText$warningText")
                 }
             } catch (e: Exception) {
                 Log.e("CartographerJNI", "保存户型图失败", e)
@@ -2006,7 +2026,9 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         val file: File,
         val annotation: FloorPlanImageAnnotator.Result,
         val dimensions: FloorPlanDimensions?,
+        val mappingCoveragePercent: Float? = null,
         val outlineClosed: Boolean,
+        val outlineVerticesPixels: List<FloorPlanPixelPoint>? = null,
         val sharedMapMeasurement: MapMeasurement?,
         val structuralMap: File?,
         val floorPlanOverlay: File? = null,
