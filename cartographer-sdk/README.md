@@ -58,6 +58,23 @@ foreground service and call the SDK from that service. The SDK deliberately does
 service or request notification permissions. Customers already shipping OpenCV or `libc++_shared`
 must align those native versions to avoid duplicate-library packaging conflicts.
 
+## Heat-map coverage
+
+Record Wi-Fi RSSI together with the current `SdkSnapshot.pose`, then pass those measurements when
+generating the floor plan:
+
+```kotlin
+sdk.generateFloorPlan(output, workDir, heatMapSamples) { result, floorPlan ->
+    val coverage = floorPlan?.heatMapCoverage
+    Log.i("HeatMap", "coverage=${coverage?.coveragePercent}")
+}
+```
+
+`HeatMapSample` uses SLAM world coordinates in metres. Coverage is the unique usable indoor area
+within 1.5 metres of the valid sampled route divided by the usable area inside the fitted outline.
+Occupied wall cells block propagation, samples separated by more than three seconds or three metres
+are not joined, and repeated passes do not increase the covered area.
+
 ## Release
 
 ```shell

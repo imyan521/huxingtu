@@ -1079,38 +1079,6 @@ double ProjectionOverlapRatio(const cv::Vec4i& first, const cv::Vec4i& second) {
                      second_span[1] - second_span[0]));
 }
 
-double MappingCoveragePercent(
-        const cv::Mat& semantic_map,
-        const std::vector<cv::Point2f>& outline_polygon) {
-    if (semantic_map.empty() || semantic_map.type() != CV_8UC3 ||
-        outline_polygon.size() < 3) {
-        return -1.0;
-    }
-    std::vector<cv::Point> vertices;
-    vertices.reserve(outline_polygon.size());
-    for (const cv::Point2f& point : outline_polygon) {
-        if (!std::isfinite(point.x) || !std::isfinite(point.y)) return -1.0;
-        vertices.emplace_back(cvRound(point.x), cvRound(point.y));
-    }
-    cv::Mat footprint = cv::Mat::zeros(semantic_map.size(), CV_8UC1);
-    cv::fillPoly(footprint,
-                 std::vector<std::vector<cv::Point>>{vertices},
-                 cv::Scalar(255));
-    const int total_cells = cv::countNonZero(footprint);
-    if (total_cells == 0) return -1.0;
-
-    // Use the original semantic raster, never the presentation PNG: its
-    // unknown cells are painted white for the final report but remain unknown.
-    cv::Mat unknown_cells;
-    cv::inRange(semantic_map,
-                cv::Scalar(154, 154, 154),
-                cv::Scalar(154, 154, 154),
-                unknown_cells);
-    cv::bitwise_and(unknown_cells, footprint, unknown_cells);
-    const int known_cells = total_cells - cv::countNonZero(unknown_cells);
-    return 100.0 * known_cells / total_cells;
-}
-
 // Recovery passes can reintroduce the two observed faces of one partition
 // after earlier deduplication. Consolidate only genuinely overlapping runs;
 // collinear runs separated by a doorway must remain separate.
@@ -8481,14 +8449,6 @@ PipelineResult RunPipeline(const std::string& input_path,
                   << " outline_branch=" << outline_choice->branch
                   << " score=" << std::fixed << std::setprecision(2) << best.score
                   << std::defaultfloat << "\n";
-    }
-    best.mapping_coverage_percent = MappingCoveragePercent(
-            cv::imread(options.semantic_input_path, cv::IMREAD_COLOR),
-            best.outline_polygon_px);
-    if (best.mapping_coverage_percent >= 0.0) {
-        std::cout << "[INFO] 建图覆盖率=" << std::fixed
-                  << std::setprecision(1) << best.mapping_coverage_percent
-                  << "%" << std::defaultfloat << "\n";
     }
     std::cout << "[INFO] 端到端处理完成: " << output_path << "\n";
     return best;

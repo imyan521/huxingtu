@@ -27,7 +27,7 @@ data class FloorPlanGenerationInfo(
     val outlineVerticesPixels: List<FloorPlanPixelPoint>,
     val footprintAreaPixelsSquared: Float,
     val footprintPerimeterPixels: Float,
-    val mappingCoveragePercent: Float? = null
+    val heatMapCoveragePercent: Float? = null
 )
 
 class FloorPlanNative {
@@ -99,10 +99,7 @@ class FloorPlanNative {
             dimensionShortSizePixels = values[18].toFloat(),
             outlineVerticesPixels = outlineVertices,
             footprintAreaPixelsSquared = values[polygonEnd].toFloat(),
-            footprintPerimeterPixels = values[polygonEnd + 1].toFloat(),
-            mappingCoveragePercent = values.getOrNull(polygonEnd + 2)
-                ?.toFloat()
-                ?.takeIf { it in 0f..100f }
+            footprintPerimeterPixels = values[polygonEnd + 1].toFloat()
         )
         return info.takeIf {
             output.exists() && it.outlineWidthPixels > 0f && it.outlineHeightPixels > 0f &&

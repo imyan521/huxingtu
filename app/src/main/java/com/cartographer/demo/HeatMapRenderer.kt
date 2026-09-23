@@ -5,6 +5,8 @@ import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
 import android.graphics.Rect
 import android.graphics.RectF
 import kotlin.math.ceil
@@ -22,14 +24,14 @@ data class RssiSample(
 object HeatMapRenderer {
     private const val GRID_SIZE = 128
     private const val MAX_INTERPOLATION_SAMPLES = 600
-    private const val MAX_SUPPORT_DISTANCE_METERS = 5f
     private const val MIN_DISTANCE_SQUARED = 0.0025
     private const val LAYER_ALPHA = 155
 
     fun render(
         samples: List<RssiSample>,
         geometry: FloorPlanMapExporter.ExportGeometry,
-        outlinePixels: List<FloorPlanPixelPoint>
+        outlinePixels: List<FloorPlanPixelPoint>,
+        supportMask: Bitmap? = null
     ): Bitmap? {
         val allValidSamples = samples.filter {
             it.worldX.isFinite() && it.worldY.isFinite() &&
@@ -61,7 +63,8 @@ object HeatMapRenderer {
         )
         val pixels = IntArray(gridWidth * gridHeight)
         val supportDistanceSquared =
-            MAX_SUPPORT_DISTANCE_METERS * MAX_SUPPORT_DISTANCE_METERS
+            HeatMapCoverageCalculator.SUPPORT_RADIUS_METERS *
+                HeatMapCoverageCalculator.SUPPORT_RADIUS_METERS
         for (gridY in 0 until gridHeight) {
             val pixelY = (gridY + 0.5f) * geometry.heightPx / gridHeight
             val worldY = geometry.worldMaxY -
@@ -116,6 +119,14 @@ object HeatMapRenderer {
             Paint(Paint.FILTER_BITMAP_FLAG)
         )
         canvas.restore()
+        if (supportMask != null && !supportMask.isRecycled &&
+            supportMask.width == output.width && supportMask.height == output.height) {
+            val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+            }
+            canvas.drawBitmap(supportMask, 0f, 0f, maskPaint)
+            maskPaint.xfermode = null
+        }
         coarse.recycle()
         return output
     }

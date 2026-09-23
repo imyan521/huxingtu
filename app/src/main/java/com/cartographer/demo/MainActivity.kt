@@ -1434,7 +1434,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
     ): FloorPlanGenerationResult? {
         val output = File(export.sessionDir, "floorplan_result_$timestamp.png")
         val workDir = File(export.sessionDir, "work")
-        val generation = floorPlanNative.generate(
+        val nativeGeneration = floorPlanNative.generate(
             input = export.input,
             visualInput = export.visual,
             semanticInput = export.semantic,
@@ -1443,10 +1443,27 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
             metersPerPixel = export.geometry.resolutionMetersPerPixel,
             trajectoryPixels = export.trajectoryPixels
         )
-        if (generation == null) {
+        if (nativeGeneration == null) {
             return generateFallbackFloorPlan(output, export)
         }
         if (!output.exists()) return null
+        val rssiSnapshot = rssiSamples.toList()
+        val semanticBitmap = BitmapFactory.decodeFile(export.semantic.absolutePath)
+        val heatMapCoverage = semanticBitmap?.let { semantic ->
+            try {
+                HeatMapCoverageCalculator.calculate(
+                    samples = rssiSnapshot,
+                    geometry = export.geometry,
+                    outlinePixels = nativeGeneration.outlineVerticesPixels,
+                    semanticMap = semantic
+                )
+            } finally {
+                semantic.recycle()
+            }
+        }
+        val generation = nativeGeneration.copy(
+            heatMapCoveragePercent = heatMapCoverage?.coveragePercent
+        )
         var annotation = FloorPlanImageAnnotator.annotateFile(
             file = output,
             generation = generation,
@@ -1457,7 +1474,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
             annotation = FloorPlanImageAnnotator.annotateFallbackFile(
                 file = output,
                 metersPerPixel = export.geometry.resolutionMetersPerPixel,
-                mappingCoveragePercent = generation.mappingCoveragePercent
+                heatMapCoveragePercent = generation.heatMapCoveragePercent
             )
         }
         val length = annotation.lengthMeters.takeIf { it.isFinite() && it > 0f }
@@ -1513,21 +1530,26 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
             }
 
         val heatMapOverlayFile = File(workDir, "heatmap_overlay.png")
-        HeatMapRenderer.render(
-            samples = rssiSamples.toList(),
-            geometry = export.geometry,
-            outlinePixels = generation.outlineVerticesPixels
-        )?.let { heatMap ->
-            try {
-                FileOutputStream(heatMapOverlayFile).use { stream ->
-                    if (!heatMap.compress(Bitmap.CompressFormat.PNG, 100, stream)) {
-                        throw IOException("透明热力图层写入失败")
+        try {
+            HeatMapRenderer.render(
+                samples = rssiSnapshot,
+                geometry = export.geometry,
+                outlinePixels = generation.outlineVerticesPixels,
+                supportMask = heatMapCoverage?.supportMask
+            )?.let { heatMap ->
+                try {
+                    FileOutputStream(heatMapOverlayFile).use { stream ->
+                        if (!heatMap.compress(Bitmap.CompressFormat.PNG, 100, stream)) {
+                            throw IOException("透明热力图层写入失败")
+                        }
                     }
+                } finally {
+                    heatMap.recycle()
                 }
-            } finally {
-                heatMap.recycle()
-            }
-        } ?: Log.i("HeatMap", "有效 RSSI 样本不足，跳过热力图层")
+            } ?: Log.i("HeatMap", "有效 RSSI 轨迹不足，跳过热力图层")
+        } finally {
+            heatMapCoverage?.supportMask?.recycle()
+        }
 
         val trajectoryOverlayFile = File(workDir, "trajectory_overlay.png")
         TrajectoryOverlayRenderer.render(
@@ -1549,7 +1571,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
             file = output,
             annotation = annotation,
             dimensions = dimensions,
-            mappingCoveragePercent = generation.mappingCoveragePercent,
+            heatMapCoveragePercent = generation.heatMapCoveragePercent,
             outlineClosed = generation.outlineClosed,
             outlineVerticesPixels = generation.outlineVerticesPixels,
             sharedMapMeasurement = sharedMapMeasurement,
@@ -1638,7 +1660,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
 
         currentFloorPlanResult = selected
         currentFloorPlanDimensions = generated?.dimensions ?: layerExport.previewDimensions
-        currentFloorPlanCoveragePercent = generated?.mappingCoveragePercent
+        currentFloorPlanCoveragePercent = generated?.heatMapCoveragePercent
         generated?.sharedMapMeasurement?.let { sharedMeasurement ->
             // Invalidate any older asynchronous raster-bounds calculation and
             // drive the map overlay from the same fitted outline used by the
@@ -1652,6 +1674,12 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
             !generated.annotation.annotated -> "户型图已生成，但尺寸标注失败：" +
                 (generated.annotation.failureReason ?: "未知原因")
             !generated.outlineClosed -> "拟合轮廓未完全闭合，尺寸按绿色拟合边界外接范围计算"
+            generated.heatMapCoveragePercent == null ->
+                "没有足够的有效 RSSI 轨迹，无法评估热力图覆盖率"
+            generated.heatMapCoveragePercent < 60f ->
+                "热力图覆盖不足，建议继续行走采集"
+            generated.heatMapCoveragePercent < 80f ->
+                "热力图存在部分盲区，建议补充采集"
             else -> null
         }
         btnSaveFloorPlan.isEnabled = true
@@ -1681,7 +1709,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         }
         val dimensionsText = formatFloorPlanDimensions(currentFloorPlanDimensions)
         val coverageText = currentFloorPlanCoveragePercent
-            ?.let { "\n${formatMappingCoverage(it)}" }.orEmpty()
+            ?.let { "\n${formatHeatMapCoverage(it)}" }.orEmpty()
         val warningText = currentFloorPlanWarning?.let { "\n$it" }.orEmpty()
         return "$resultDescription\n$dimensionsText$coverageText$warningText"
     }
@@ -1761,15 +1789,15 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         )
     }
 
-    private fun formatMappingCoverage(percent: Float): String =
-        String.format(Locale.US, "建图覆盖率：%.1f%%", percent)
+    private fun formatHeatMapCoverage(percent: Float): String =
+        String.format(Locale.US, "热力图有效覆盖率：%.1f%%", percent)
 
     private fun updateMeasurementDisplay() {
         val mapText = formatMapMeasurement(currentMapMeasurement)
         val floorPlanText = currentFloorPlanDimensions?.let { "\n${formatFloorPlanDimensions(it)}" }
             .orEmpty()
         val coverageText = currentFloorPlanCoveragePercent
-            ?.let { "\n${formatMappingCoverage(it)}" }.orEmpty()
+            ?.let { "\n${formatHeatMapCoverage(it)}" }.orEmpty()
         tvMapMeasurement.text = mapText + floorPlanText + coverageText
     }
 
@@ -1807,7 +1835,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                     updateMeasurementDisplay()
                     val dimensionsText = formatFloorPlanDimensions(dimensions)
                     val coverageText = coveragePercent
-                        ?.let { "\n${formatMappingCoverage(it)}" }.orEmpty()
+                        ?.let { "\n${formatHeatMapCoverage(it)}" }.orEmpty()
                     val warningText = warning?.let { "\n注意：$it" }.orEmpty()
                     show("户型图已保存：$location\n$dimensionsText$coverageText$warningText")
                 }
@@ -2026,7 +2054,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         val file: File,
         val annotation: FloorPlanImageAnnotator.Result,
         val dimensions: FloorPlanDimensions?,
-        val mappingCoveragePercent: Float? = null,
+        val heatMapCoveragePercent: Float? = null,
         val outlineClosed: Boolean,
         val outlineVerticesPixels: List<FloorPlanPixelPoint>? = null,
         val sharedMapMeasurement: MapMeasurement?,

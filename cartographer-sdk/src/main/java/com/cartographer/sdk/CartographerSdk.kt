@@ -22,7 +22,9 @@ import com.cartographer.demo.FloorPlanMapExporter
 import com.cartographer.demo.FloorPlanNative
 import com.cartographer.demo.FloorPlanPixelPoint
 import com.cartographer.demo.FusedMapRenderer
+import com.cartographer.demo.HeatMapCoverageCalculator
 import com.cartographer.demo.LidarParser
+import com.cartographer.demo.RssiSample
 import com.hoho.android.usbserial.driver.UsbSerialPort
 import com.hoho.android.usbserial.driver.UsbSerialProber
 import com.hoho.android.usbserial.util.SerialInputOutputManager
@@ -274,14 +276,28 @@ class CartographerSdk private constructor(
         output: File,
         workDir: File,
         callback: (SdkResult, FinalFloorPlan?) -> Unit
+    ): SdkResult = generateFloorPlan(output, workDir, emptyList(), callback)
+
+    /**
+     * Generates a floor plan and evaluates wall-aware heat-map coverage from
+     * RSSI measurements recorded with mapping poses.
+     */
+    fun generateFloorPlan(
+        output: File,
+        workDir: File,
+        heatMapSamples: List<HeatMapSample>,
+        callback: (SdkResult, FinalFloorPlan?) -> Unit
     ): SdkResult {
         if (closed.get()) {
             val failure = SdkResult.failure(SdkError.CLOSED, "SDK is closed")
             post { callback(failure, null) }
             return failure
         }
+        val sampleSnapshot = heatMapSamples.toList()
         worker.execute {
-            val outcome = runCatching { generateFinalFloorPlan(output, workDir) }
+            val outcome = runCatching {
+                generateFinalFloorPlan(output, workDir, sampleSnapshot)
+            }
             val value = outcome.getOrNull()
             val result = if (value != null) SdkResult.success() else {
                 SdkResult.failure(
@@ -515,7 +531,11 @@ class CartographerSdk private constructor(
         heightPixels = bitmap.height
     )
 
-    private fun generateFinalFloorPlan(output: File, workDir: File): FinalFloorPlan {
+    private fun generateFinalFloorPlan(
+        output: File,
+        workDir: File,
+        heatMapSamples: List<HeatMapSample>
+    ): FinalFloorPlan {
         val fused = renderFinalMap()
             ?: throw IllegalStateException("No optimized submaps are available")
         workDir.mkdirs()
@@ -563,7 +583,7 @@ class CartographerSdk private constructor(
             if (trajectoryPixels.isEmpty()) {
                 throw IllegalStateException("No optimized trajectory is available")
             }
-            val generation = floorPlan.generate(
+            val nativeGeneration = floorPlan.generate(
                 input = inputFile,
                 visualInput = visualFile,
                 semanticInput = semanticFile,
@@ -572,6 +592,24 @@ class CartographerSdk private constructor(
                 metersPerPixel = geometry.resolutionMetersPerPixel,
                 trajectoryPixels = trajectoryPixels
             ) ?: throw IllegalStateException("Native floor-plan fitting failed")
+
+            val coverageCalculation = HeatMapCoverageCalculator.calculate(
+                samples = heatMapSamples.map { sample ->
+                    RssiSample(
+                        worldX = sample.worldX,
+                        worldY = sample.worldY,
+                        rssiDbm = sample.rssiDbm,
+                        timestampMillis = sample.timestampMillis
+                    )
+                },
+                geometry = geometry,
+                outlinePixels = nativeGeneration.outlineVerticesPixels,
+                semanticMap = semanticRender.bitmap
+            )
+            val generation = nativeGeneration.copy(
+                heatMapCoveragePercent = coverageCalculation?.coveragePercent
+            )
+            coverageCalculation?.supportMask?.recycle()
 
             val annotation = FloorPlanImageAnnotator.annotateFile(
                 file = output,
@@ -609,7 +647,15 @@ class CartographerSdk private constructor(
                 supportRatio = generation.supportRatio,
                 footprintPerimeterMeters = generation.footprintPerimeterPixels *
                     geometry.resolutionMetersPerPixel,
-                mappingCoveragePercent = generation.mappingCoveragePercent,
+                heatMapCoverage = coverageCalculation?.let { coverage ->
+                    HeatMapCoverage(
+                        coveragePercent = coverage.coveragePercent,
+                        coveredAreaSquareMeters = coverage.coveredAreaSquareMeters,
+                        targetAreaSquareMeters = coverage.targetAreaSquareMeters,
+                        supportRadiusMeters = coverage.supportRadiusMeters,
+                        validSampleCount = coverage.validSampleCount
+                    )
+                },
                 geometry = RasterGeometry(
                     resolutionMetersPerPixel = geometry.resolutionMetersPerPixel,
                     worldMinX = geometry.worldMinX,
@@ -787,13 +833,29 @@ data class FloorPlanDimensions(
         areaSquareMeters.isFinite() && areaSquareMeters > 0f
 }
 
+/** RSSI measurement captured at the device's mapping pose in world coordinates. */
+data class HeatMapSample(
+    val worldX: Float,
+    val worldY: Float,
+    val rssiDbm: Float,
+    val timestampMillis: Long = 0L
+)
+
+/** Wall-aware support of valid RSSI trajectory samples inside the floor plan. */
+data class HeatMapCoverage(
+    val coveragePercent: Float,
+    val coveredAreaSquareMeters: Float,
+    val targetAreaSquareMeters: Float,
+    val supportRadiusMeters: Float,
+    val validSampleCount: Int
+)
+
 /**
  * Final floor-plan result returned by [CartographerSdk.generateFloorPlan].
  *
- * [mappingCoveragePercent] is the percentage of known (free or occupied)
- * semantic-map cells inside the fitted exterior outline. Unknown cells are
- * excluded from the numerator even when the exported PNG paints them white.
- * It is in the range 0..100, or null when coverage cannot be calculated.
+ * [heatMapCoverage] measures the non-duplicated indoor area within 1.5 metres
+ * of valid RSSI trajectory samples. Propagation is clipped by the fitted
+ * outline and does not cross occupied walls.
  */
 data class FinalFloorPlan(
     val imageFile: File,
@@ -807,8 +869,12 @@ data class FinalFloorPlan(
     val supportRatio: Float,
     val footprintPerimeterMeters: Float,
     val geometry: RasterGeometry,
-    val mappingCoveragePercent: Float? = null
-)
+    val heatMapCoverage: HeatMapCoverage? = null
+) {
+    @Deprecated("Use heatMapCoverage.coveragePercent")
+    val mappingCoveragePercent: Float?
+        get() = heatMapCoverage?.coveragePercent
+}
 
 data class RelocalizationStatus(
     val oldTrajectoryCount: Int,

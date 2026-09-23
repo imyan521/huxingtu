@@ -101,14 +101,13 @@ FloorPlanNativeGenerate(
                 result.dimension_long_size_px,
                 result.dimension_short_size_px,
         };
-        values.reserve(values.size() + result.outline_polygon_px.size() * 2 + 3);
+        values.reserve(values.size() + result.outline_polygon_px.size() * 2 + 2);
         for (const auto& point : result.outline_polygon_px) {
             values.push_back(point.x);
             values.push_back(point.y);
         }
         values.push_back(result.footprint_area_px2);
         values.push_back(result.footprint_perimeter_px);
-        values.push_back(result.mapping_coverage_percent);
         jdoubleArray output_values = env->NewDoubleArray(
                 static_cast<jsize>(values.size()));
         if (output_values == nullptr) return nullptr;

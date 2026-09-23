@@ -79,7 +79,7 @@ object FloorPlanImageAnnotator {
                 lengthMeters,
                 widthMeters,
                 area,
-                generation.mappingCoveragePercent,
+                generation.heatMapCoveragePercent,
                 metersPerPixel
             )
             annotated = annotatedBitmap
@@ -122,7 +122,7 @@ object FloorPlanImageAnnotator {
     fun annotateFallbackFile(
         file: File,
         metersPerPixel: Float,
-        mappingCoveragePercent: Float? = null
+        heatMapCoveragePercent: Float? = null
     ): Result {
         if (!file.exists() || !metersPerPixel.isFinite() || metersPerPixel <= 0f) {
             return Result(false, "户型图兜底输入无效")
@@ -216,7 +216,7 @@ object FloorPlanImageAnnotator {
                 outlineVerticesPixels = vertices,
                 footprintAreaPixelsSquared = fitted.longSize * fitted.shortSize,
                 footprintPerimeterPixels = 2f * (fitted.longSize + fitted.shortSize),
-                mappingCoveragePercent = mappingCoveragePercent
+                heatMapCoveragePercent = heatMapCoveragePercent
             )
             annotateFile(file, generation, metersPerPixel)
         } catch (_: OutOfMemoryError) {
@@ -644,16 +644,16 @@ object FloorPlanImageAnnotator {
         lengthMeters: Float,
         widthMeters: Float,
         areaSquareMeters: Float,
-        mappingCoveragePercent: Float?,
+        heatMapCoveragePercent: Float?,
         metersPerPixel: Float
     ): Bitmap {
         val shortSide = min(source.width, source.height).toFloat().coerceAtLeast(1f)
         // Compact report style: small labels sit directly beside the green
         // contour instead of surrounding the plan with large dimension lines.
         val textSize = (shortSide * 0.022f).coerceIn(9f, 24f)
-        val coverageText = mappingCoveragePercent
+        val coverageText = heatMapCoveragePercent
             ?.takeIf { it.isFinite() && it in 0f..100f }
-            ?.let { String.format(Locale.US, "建图覆盖率：%.1f%%", it) }
+            ?.let { String.format(Locale.US, "热力图有效覆盖率：%.1f%%", it) }
         val summaryHeight = textSize * (if (coverageText == null) 1.9f else 3.2f)
         val dimensionMargin = (textSize * 2.0f).coerceIn(22f, 64f)
         val outerPadding = max(10f, textSize * 0.45f)

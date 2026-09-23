@@ -74,9 +74,6 @@ struct PipelineResult {
     double dimension_short_size_px = 0.0;
     double footprint_area_px2 = 0.0;
     double footprint_perimeter_px = 0.0;
-    // Known free/occupied cells divided by all cells inside the selected
-    // exterior footprint. Negative means coverage could not be calculated.
-    double mapping_coverage_percent = -1.0;
     // Closed outline vertices in the original algorithm-input pixel space.
     // Android converts these exact points back to SLAM world coordinates so
     // the map overlay and the exported floor plan share one geometry source.
