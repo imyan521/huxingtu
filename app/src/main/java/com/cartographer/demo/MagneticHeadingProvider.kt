@@ -28,6 +28,11 @@ data class MagneticHeadingState(
     val magneticXMicroTesla: Float = 0f,
     val magneticYMicroTesla: Float = 0f,
     val magneticZMicroTesla: Float = 0f,
+    val gravityX: Float = 0f,
+    val gravityY: Float = 0f,
+    val gravityZ: Float = 0f,
+    val gravityMagnitude: Float = 0f,
+    val sensorMaximumRangeMicroTesla: Float = 0f,
     val fieldStrengthMicroTesla: Float = 0f,
     val fieldStrengthStdDevMicroTesla: Float = Float.POSITIVE_INFINITY,
     val samplingDurationMillis: Long = 0L
@@ -136,6 +141,13 @@ class MagneticHeadingProvider(
             magneticXMicroTesla = magneticX,
             magneticYMicroTesla = magneticY,
             magneticZMicroTesla = magneticZ,
+            gravityX = gravity[0],
+            gravityY = gravity[1],
+            gravityZ = gravity[2],
+            gravityMagnitude = sqrt(
+                gravity[0] * gravity[0] + gravity[1] * gravity[1] + gravity[2] * gravity[2]
+            ),
+            sensorMaximumRangeMicroTesla = magnetometer?.maximumRange ?: 0f,
             fieldStrengthMicroTesla = fieldStrength,
             fieldStrengthStdDevMicroTesla = fieldStdDev,
             samplingDurationMillis = samplingDurationMillis
@@ -153,6 +165,13 @@ class MagneticHeadingProvider(
         magneticXMicroTesla = magneticX,
         magneticYMicroTesla = magneticY,
         magneticZMicroTesla = magneticZ,
+        gravityX = gravity[0],
+        gravityY = gravity[1],
+        gravityZ = gravity[2],
+        gravityMagnitude = sqrt(
+            gravity[0] * gravity[0] + gravity[1] * gravity[1] + gravity[2] * gravity[2]
+        ),
+        sensorMaximumRangeMicroTesla = magnetometer?.maximumRange ?: 0f,
         fieldStrengthMicroTesla = fieldStrength
     )
 

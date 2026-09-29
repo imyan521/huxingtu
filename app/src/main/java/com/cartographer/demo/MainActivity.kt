@@ -56,7 +56,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         private const val RELOCALIZATION_TIMEOUT_NODE_COUNT = 30
         private const val LIVE_SCAN_STALE_TIMEOUT_NS = 1_000_000_000L
         private const val DEVICE_TO_ROBOT_HEADING_OFFSET_RAD = 0f
-        private const val MAGNETIC_CALIBRATION_TIMEOUT_MS = 10_000L
+        private const val MAGNETIC_CALIBRATION_TIMEOUT_MS = 45_000L
         private const val RSSI_SAMPLE_INTERVAL_MS = 1_000L
     }
 
@@ -91,6 +91,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
     private val floorPlanNative = FloorPlanNative()
     private val sensorManager by lazy { getSystemService(Context.SENSOR_SERVICE) as SensorManager }
     private val magneticHeadingProvider by lazy { MagneticHeadingProvider(sensorManager) }
+    private val postMappingNorthCalibrator = PostMappingNorthCalibrator()
     private val wifiManager by lazy {
         applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
     }
@@ -167,6 +168,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
     private var savedMapFile: File? = null
     @Volatile private var finishedMapPose: Pose2D? = null
     @Volatile private var isMagneticCalibrationRunning = false
+    @Volatile private var latestPostCalibrationResult = PostMappingNorthCalibrator.Result()
     private val rssiSamples = ArrayList<RssiSample>()
     private var lastRssiSampleMs = 0L
 
@@ -238,6 +240,10 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         }
 
         findViewById<Button>(R.id.btn_start_mapping).setOnClickListener {
+            if (isMagneticCalibrationRunning) {
+                show("请先完成结束建图后的南北标定")
+                return@setOnClickListener
+            }
             if (!isSensorRunning) {
                 Toast.makeText(this, "先开传感器！", Toast.LENGTH_SHORT).show()
                 return@setOnClickListener
@@ -294,6 +300,10 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
     }
 
     private fun startContinueMapping() {
+        if (isMagneticCalibrationRunning) {
+            show("请先完成结束建图后的南北标定")
+            return
+        }
         if (!isSensorRunning) {
             show("先开传感器！")
             return
@@ -345,6 +355,8 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         btnMapNorth.alpha = 1f
         btnMapNorth.contentDescription = "磁力计：点击后将地图按磁北方向居中"
         isMagneticCalibrationRunning = false
+        postMappingNorthCalibrator.cancel()
+        latestPostCalibrationResult = PostMappingNorthCalibrator.Result()
         savedMapNorthAlignment = null
         savedMapFile = null
         pendingNorthAlignment = null
@@ -602,6 +614,17 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                 gyro[1] = e.values[1]
                 gyro[2] = e.values[2]
                 hasGyroscopeSample = true
+                if (isMagneticCalibrationRunning && hasAccelerationSample) {
+                    postMappingNorthCalibrator.addGyroscopeSample(
+                        timestampNs = e.timestamp,
+                        gyroX = e.values[0],
+                        gyroY = e.values[1],
+                        gyroZ = e.values[2],
+                        gravityX = acc[0],
+                        gravityY = acc[1],
+                        gravityZ = acc[2]
+                    )
+                }
             }
             else -> return
         }
@@ -653,6 +676,11 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                 }
                 maybeFetchSubmaps(status.insertedNodes)
                 val tip = when {
+                    isMagneticCalibrationRunning -> {
+                        val calibration = latestPostCalibrationResult
+                        "南北标定中：旋转 ${String.format(Locale.US, "%.0f°", calibration.rotationDegrees)}，" +
+                            "回位误差 ${String.format(Locale.US, "%.0f°", calibration.returnErrorDegrees)}"
+                    }
                     isFinishingMapping -> "正在完成优化"
                     isMappingRunning && relocalizationPhase == RelocalizationPhase.WAITING -> "正在旧地图中重定位"
                     isMappingRunning && relocalizationPhase == RelocalizationPhase.TIMEOUT -> "重定位尚未成功，请回到已建区域"
@@ -959,23 +987,19 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         }
 
         isFinishingMapping = true
-        magneticHeadingProvider.beginCalibration()
         setDataReceivePaused(true)
         btnFinishMapping.isEnabled = false
         btnSaveMap.isEnabled = false
-        show("正在结束建图并完成优化…")
+        show("正在结束建图并完成优化，请保持整套设备朝向不动…")
 
         Thread {
             try {
                 carto.finishTrajectory()
                 val finalPose = carto.getLastFinishedPose()?.to2D()
                 finishedMapPose = finalPose
-                // Lock magnetic heading while the trajectory is ending, when the
-                // optimized endpoint still represents the handheld device direction.
-                // A loaded map keeps its original north reference.
-                val finishHeading = magneticHeadingProvider.getState()
+                // A continued map keeps its stored north. A new map performs a
+                // full-turn hard-iron calibration only after optimization ends.
                 pendingNorthAlignment = loadedMapNorthAlignment
-                    ?: calculateMapNorthAlignment(finishHeading, finalPose)
                 val optimizedSubmaps = carto.getSubmapTextures()
                 val optimizedTrajectory = carto.getTrajectoryNodePoses()
                 finalizedSubmaps = optimizedSubmaps
@@ -986,17 +1010,41 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                     mapView.setSubmapTextures(optimizedSubmaps)
                     replaceMeasurementTextures(optimizedSubmaps)
                     mapView.setOptimizedTrajectory(optimizedTrajectory)
-                    btnSaveMap.isEnabled = true
-                    btnContinueMapping.isEnabled = true
+                    val needsNorthCalibration = loadedMapNorthAlignment == null
+                    btnSaveMap.isEnabled = !needsNorthCalibration
+                    btnContinueMapping.isEnabled = !needsNorthCalibration
                     btnCancelContinueMapping.visibility = View.GONE
-                    show(if (mappingMode == MappingMode.CONTINUE_MAPPING) {
-                        northAlignmentFinishMessage("补采与优化已完成，可以保存扩展地图")
+                    btnMapNorth.visibility = View.VISIBLE
+                    btnMapNorth.isEnabled = !needsNorthCalibration
+                    btnMapNorth.alpha = if (needsNorthCalibration) 0.55f else 1f
+                    btnMapNorth.contentDescription = if (needsNorthCalibration) {
+                        "结束建图后的磁北标定即将开始"
                     } else {
-                        northAlignmentFinishMessage("建图与优化已完成，可以保存地图")
-                    })
+                        "磁力计：点击后将地图按磁北方向居中"
+                    }
+                    btnMapNorth.bringToFront()
+                    if (!needsNorthCalibration) {
+                        show(if (mappingMode == MappingMode.CONTINUE_MAPPING) {
+                            "补采与优化已完成，已沿用原地图北向，可以保存扩展地图"
+                        } else {
+                            "建图与优化已完成，可以保存地图"
+                        })
+                    }
+                }
+                if (loadedMapNorthAlignment == null) {
+                    if (finalPose == null) {
+                        runOnUiThread {
+                            btnMapNorth.isEnabled = true
+                            btnMapNorth.alpha = 1f
+                            show("没有最终地图位姿，无法进行结束后的南北标定")
+                        }
+                    } else {
+                        startPostMappingNorthCalibration(finalPose)
+                    }
                 }
             } catch (e: Exception) {
                 Log.e("CartographerJNI", "结束建图失败", e)
+                postMappingNorthCalibrator.cancel()
                 setDataReceivePaused(false)
                 runOnUiThread {
                     btnFinishMapping.isEnabled = true
@@ -1091,6 +1139,18 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                 null
             }
 
+            val floorPlanRotationDegrees = alignmentForSave?.let {
+                Math.toDegrees(it.magneticNorthYawRadians.toDouble()).toFloat()
+            } ?: 0f
+            val alignedFloorPlanResult = floorPlanResult?.let {
+                rotateGeneratedFloorPlanToNorth(it, floorPlanRotationDegrees)
+            }
+            val alignedFallback = if (alignedFloorPlanResult == null) {
+                floorPlanOutput?.visual?.let {
+                    rotateFloorPlanFileToNorth(it, floorPlanRotationDegrees, "north_right")
+                }
+            } else null
+
             runOnUiThread {
                 btnSaveMap.isEnabled = true
                 // Start the on-screen final fusion only after export/generation
@@ -1099,7 +1159,12 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                 if (finalizedTextures.isNotEmpty()) {
                     mapView.setFinalizedSubmapTextures(finalizedTextures)
                 }
-                val floorPlanText = updateCurrentFloorPlan(floorPlanOutput, floorPlanResult)
+                val floorPlanText = updateCurrentFloorPlan(
+                    floorPlanOutput,
+                    alignedFloorPlanResult,
+                    alignedFallback,
+                    floorPlanRotationDegrees
+                )
                 val mapText = if (ok) {
                     when {
                         publicMapLocation != null -> "地图已保存：$publicMapLocation"
@@ -1166,16 +1231,15 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         }.start()
     }
 
-    private fun calculateMapNorthAlignment(
-        heading: MagneticHeadingState,
-        finalPose: Pose2D?
+    private fun calculatePostMappingNorthAlignment(
+        calibration: PostMappingNorthCalibrator.Result,
+        finalPose: Pose2D?,
+        heading: MagneticHeadingState
     ): MapNorthAlignment? {
-        if (!heading.isStable || finalPose == null) return null
-        // Android azimuth is clockwise from magnetic north. Therefore magnetic
-        // north is headingRadians counter-clockwise from the robot forward
-        // direction. Add that relative angle to the optimized map yaw.
+        if (!calibration.isReady || finalPose == null) return null
         val northYaw = normalizeRadians(
-            finalPose.theta + heading.headingRadians + DEVICE_TO_ROBOT_HEADING_OFFSET_RAD
+            finalPose.theta + calibration.correctedHeadingRadians +
+                DEVICE_TO_ROBOT_HEADING_OFFSET_RAD
         )
         return MapNorthAlignment(
             magneticNorthYawRadians = northYaw.toFloat(),
@@ -1184,15 +1248,25 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         )
     }
 
-    private fun northAlignmentFinishMessage(baseMessage: String): String {
-        return if (pendingNorthAlignment != null) {
-            "$baseMessage；磁北方向已锁定"
-        } else {
-            "$baseMessage；保存后点击地图右上角磁力计图标，短暂保持朝向完成磁北校准"
-        }
-    }
-
     private fun alignMapToMagneticNorth() {
+        if (isMagneticCalibrationRunning) {
+            show("南北标定正在进行：请将整套设备缓慢旋转一圈，再回到点击结束建图时的朝向")
+            return
+        }
+        if (savedMapFile == null && isMappingFinished) {
+            val alignment = pendingNorthAlignment
+            if (alignment == null) {
+                val finalPose = finishedMapPose
+                if (finalPose == null) {
+                    show("没有最终地图位姿，无法进行南北标定")
+                } else {
+                    startPostMappingNorthCalibration(finalPose)
+                }
+            } else {
+                showNorthOverview(alignment)
+            }
+            return
+        }
         val mapFile = savedMapFile
         val alignment = savedMapNorthAlignment
         if (mapFile == null || !mapFile.exists()) {
@@ -1200,9 +1274,13 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
             return
         }
         if (alignment == null) {
-            startMagneticCalibration()
+            show("该地图没有南北方向信息，请在结束建图后完成整机旋转标定再保存")
             return
         }
+        showNorthOverview(alignment)
+    }
+
+    private fun showNorthOverview(alignment: MapNorthAlignment) {
         val measurement = currentMapMeasurement
         if (measurement == null) {
             show("地图尺寸仍在计算，暂时无法自动居中")
@@ -1218,19 +1296,9 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         }
     }
 
-    private fun startMagneticCalibration() {
+    private fun startPostMappingNorthCalibration(finalPose: Pose2D) {
         if (isMagneticCalibrationRunning) {
-            show("磁北校准正在进行，请保持设备静止")
-            return
-        }
-        val mapFile = savedMapFile
-        if (mapFile == null || !mapFile.exists()) {
-            show("请先完成并保存地图")
-            return
-        }
-        val finalPose = finishedMapPose
-        if (finalPose == null) {
-            show("没有最终地图位姿，无法计算地图北向")
+            show("南北标定正在进行，请继续旋转并返回起始朝向")
             return
         }
         if (!magneticHeadingProvider.isSupported || !magneticHeadingProvider.start()) {
@@ -1239,72 +1307,73 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         }
 
         magneticHeadingProvider.beginCalibration()
+        postMappingNorthCalibrator.begin()
+        latestPostCalibrationResult = PostMappingNorthCalibrator.Result(
+            failureReason = "请开始缓慢旋转整套设备"
+        )
         isMagneticCalibrationRunning = true
-        btnMapNorth.isEnabled = false
-        btnMapNorth.alpha = 0.55f
-        btnMapNorth.contentDescription = "磁力计正在校准，请保持设备静止"
-        show("请自然手持并短暂保持朝向，正在采集磁力计数据…")
+        runOnUiThread {
+            btnMapNorth.isEnabled = false
+            btnMapNorth.alpha = 0.55f
+            btnMapNorth.contentDescription = "南北标定中：旋转整套设备一圈并返回起始朝向"
+            btnSaveMap.isEnabled = false
+            btnContinueMapping.isEnabled = false
+        }
+        show("优化已完成：请保持设备水平，缓慢旋转整套设备一圈，再回到点击结束建图时的朝向")
 
         Thread {
             val deadline = SystemClock.elapsedRealtime() + MAGNETIC_CALIBRATION_TIMEOUT_MS
-            var state = magneticHeadingProvider.getState()
+            var state: MagneticHeadingState
+            var result = postMappingNorthCalibrator.getResult()
             while (isMagneticCalibrationRunning &&
-                SystemClock.elapsedRealtime() < deadline && !state.isStable) {
+                SystemClock.elapsedRealtime() < deadline && !result.isReady &&
+                !result.isSaturated) {
+                state = magneticHeadingProvider.getState()
+                postMappingNorthCalibrator.addMagneticSample(state)
+                result = postMappingNorthCalibrator.getResult()
+                latestPostCalibrationResult = result
                 try {
-                    Thread.sleep(200L)
+                    Thread.sleep(60L)
                 } catch (_: InterruptedException) {
                     break
                 }
-                state = magneticHeadingProvider.getState()
             }
             if (!isMagneticCalibrationRunning) return@Thread
-            val alignment = calculateMapNorthAlignment(state, finalPose)
-            val metadataSaved = alignment?.let { MapMetadataStore.save(mapFile, it) } ?: false
+            state = magneticHeadingProvider.getState()
+            postMappingNorthCalibrator.addMagneticSample(state)
+            result = postMappingNorthCalibrator.getResult()
+            latestPostCalibrationResult = result
+            val alignment = calculatePostMappingNorthAlignment(result, finalPose, state)
+            postMappingNorthCalibrator.cancel()
             runOnUiThread {
                 isMagneticCalibrationRunning = false
                 btnMapNorth.isEnabled = true
                 btnMapNorth.alpha = 1f
                 btnMapNorth.contentDescription = "磁力计：点击后将地图按磁北方向居中"
                 if (alignment == null) {
-                    show(magneticCalibrationFailureMessage(state))
+                    btnSaveMap.isEnabled = false
+                    btnContinueMapping.isEnabled = false
+                    show(postMappingCalibrationFailureMessage(result))
                     return@runOnUiThread
                 }
                 pendingNorthAlignment = alignment
-                savedMapNorthAlignment = alignment
-                val accuracyWarning = if (
-                    state.accuracy == SensorManager.SENSOR_STATUS_UNRELIABLE
-                ) "（系统精度较低，建议远离电机和金属后复核）" else ""
-                show(if (metadataSaved) {
-                    "磁北校准成功$accuracyWarning"
-                } else {
-                    "磁北校准成功，但方向元数据保存失败$accuracyWarning"
-                })
-                alignMapToMagneticNorth()
+                btnSaveMap.isEnabled = true
+                btnContinueMapping.isEnabled = true
+                show("南北标定成功，可以保存地图和北向户型图")
+                showNorthOverview(alignment)
             }
         }.start()
     }
 
-    private fun magneticCalibrationFailureMessage(state: MagneticHeadingState): String {
-        return when {
-            !state.isSupported -> "当前手机没有加速度计或磁力传感器"
-            !state.isRegistered -> "磁力传感器注册失败，请重新开启传感器后重试"
-            state.callbackCount <= 0L ->
-                "没有收到手机磁力传感器回调，请检查设备传感器是否可用"
-            state.sampleCount < 25 || state.samplingDurationMillis < 1_500L ->
-                "磁力计连续有效样本不足（${state.sampleCount}/25，${
-                    String.format(Locale.US, "%.1f", state.samplingDurationMillis / 1000.0)
-                }/1.5 秒），请短暂保持朝向后重试"
-            state.fieldStrengthMicroTesla !in 15f..100f ->
-                "磁场强度异常（${String.format(Locale.US, "%.1f", state.fieldStrengthMicroTesla)} μT），" +
-                    "请远离磁铁、雷达电机、金属和大电流线缆后重试"
-            state.fieldStrengthStdDevMicroTesla > 6f ->
-                "磁场波动过大（${String.format(Locale.US, "%.1f", state.fieldStrengthStdDevMicroTesla)} μT），" +
-                    "请远离雷达电机和大电流线缆，静置后重试"
-            state.dispersionDegrees > 12f ->
-                "磁力航向波动过大（${String.format(Locale.US, "%.1f", state.dispersionDegrees)}°），" +
-                    "请短暂保持朝向后重试"
-            else -> "磁北校准失败，请保持设备静止并再次点击右上角磁力计图标"
-        }
+    private fun postMappingCalibrationFailureMessage(
+        result: PostMappingNorthCalibrator.Result
+    ): String = if (result.isSaturated) {
+        "磁力计达到硬件量程，无法恢复方向"
+    } else {
+        "南北标定未完成：${result.failureReason}；旋转 ${
+            String.format(Locale.US, "%.0f°", result.rotationDegrees)
+        }，回位误差 ${String.format(Locale.US, "%.0f°", result.returnErrorDegrees)}。" +
+            "请回到结束建图时的朝向，点击磁力计按钮重试"
     }
 
     private fun formatMagneticAccuracy(accuracy: Int): String = when (accuracy) {
@@ -1622,14 +1691,66 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         }
     }
 
+    private fun rotateGeneratedFloorPlanToNorth(
+        result: FloorPlanGenerationResult,
+        rotationDegrees: Float
+    ): FloorPlanGenerationResult {
+        val rotated = rotateFloorPlanFileToNorth(
+            result.file,
+            rotationDegrees,
+            "north_right"
+        ) ?: return result
+        return result.copy(file = rotated)
+    }
+
+    private fun rotateFloorPlanFileToNorth(
+        source: File,
+        rotationDegrees: Float,
+        suffix: String
+    ): File? {
+        if (!source.exists()) return null
+        if (!rotationDegrees.isFinite() || kotlin.math.abs(rotationDegrees) < 0.01f) {
+            return source
+        }
+        return try {
+            val bitmap = BitmapFactory.decodeFile(source.absolutePath) ?: return null
+            val rotated = FloorPlanBitmapRotator.rotate(
+                bitmap,
+                rotationDegrees,
+                android.graphics.Color.WHITE
+            )
+            val output = File(
+                source.parentFile,
+                "${source.nameWithoutExtension}_${suffix}.${source.extension.ifEmpty { "png" }}"
+            )
+            try {
+                FileOutputStream(output).use { stream ->
+                    if (!rotated.compress(Bitmap.CompressFormat.PNG, 100, stream)) {
+                        throw IOException("北向户型图写入失败")
+                    }
+                }
+            } finally {
+                if (rotated !== bitmap && !rotated.isRecycled) rotated.recycle()
+                if (!bitmap.isRecycled) bitmap.recycle()
+            }
+            output
+        } catch (error: Exception) {
+            Log.e("FloorPlan", "旋转北向户型图失败", error)
+            null
+        }
+    }
+
     private fun updateCurrentFloorPlan(
         export: FloorPlanExportResult?,
-        generated: FloorPlanGenerationResult?
+        generated: FloorPlanGenerationResult?,
+        alignedFallback: File? = null,
+        rotationDegrees: Float = 0f
     ): String {
         val selected = generated?.file?.takeIf { it.exists() }
             // The visual fallback is the complete occupancy-grid presentation:
             // gray unknown, white explored floor and black occupied boundary.
             // Algorithm input remains a separate wall-only structural raster.
+            ?: alignedFallback?.takeIf { it.exists() }
             ?: export?.visual?.takeIf { it.exists() }
         if (selected == null) {
             currentFloorPlanResult = null
@@ -1697,7 +1818,8 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                 },
                 floorPlan = generated?.floorPlanOverlay?.let {
                     BitmapFactory.decodeFile(it.absolutePath)
-                }
+                },
+                rotationDegrees = rotationDegrees
             )
         )
         updateMeasurementDisplay()
@@ -2103,6 +2225,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         clearFloorPlanLayers()
         super.onDestroy()
         isMagneticCalibrationRunning = false
+        postMappingNorthCalibrator.cancel()
         magneticHeadingProvider.stop()
         sensorManager.unregisterListener(this)
         usbIoManager?.stop()

@@ -3,7 +3,10 @@ package com.cartographer.demo
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.Matrix
 import android.graphics.Path
+import android.graphics.RectF
+import kotlin.math.ceil
 
 data class FloorPlanLayers(
     val width: Int,
@@ -12,7 +15,8 @@ data class FloorPlanLayers(
     val heatMap: Bitmap? = null,
     val trajectory: Bitmap? = null,
     val floorPlan: Bitmap? = null,
-    val pointCloudOutline: List<FloorPlanPixelPoint>? = null
+    val pointCloudOutline: List<FloorPlanPixelPoint>? = null,
+    val rotationDegrees: Float = 0f
 )
 
 data class FloorPlanLayerVisibility(
@@ -65,6 +69,30 @@ object FloorPlanLayerComposer {
         draw(layers.heatMap, visibility.heatMap)
         draw(layers.trajectory, visibility.trajectory)
         draw(layers.floorPlan, visibility.floorPlan)
+        if (!layers.rotationDegrees.isFinite() ||
+            kotlin.math.abs(layers.rotationDegrees) < 0.01f) return output
+        val rotated = FloorPlanBitmapRotator.rotate(output, layers.rotationDegrees, Color.WHITE)
+        if (rotated !== output) output.recycle()
+        return rotated
+    }
+}
+
+object FloorPlanBitmapRotator {
+    fun rotate(source: Bitmap, degrees: Float, backgroundColor: Int): Bitmap {
+        if (!degrees.isFinite() || kotlin.math.abs(degrees) < 0.01f) return source
+        val matrix = Matrix().apply { setRotate(degrees) }
+        val bounds = RectF(0f, 0f, source.width.toFloat(), source.height.toFloat())
+        matrix.mapRect(bounds)
+        val output = Bitmap.createBitmap(
+            ceil(bounds.width().toDouble()).toInt().coerceAtLeast(1),
+            ceil(bounds.height().toDouble()).toInt().coerceAtLeast(1),
+            Bitmap.Config.ARGB_8888
+        )
+        matrix.postTranslate(-bounds.left, -bounds.top)
+        Canvas(output).apply {
+            drawColor(backgroundColor)
+            drawBitmap(source, matrix, null)
+        }
         return output
     }
 }
