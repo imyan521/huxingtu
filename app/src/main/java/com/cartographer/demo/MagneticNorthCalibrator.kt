@@ -10,11 +10,12 @@ import kotlin.math.sin
 import kotlin.math.sqrt
 
 /**
- * Calibrates magnetic north after SLAM has stopped. The user rotates the whole
- * phone/lidar assembly once and returns to the pose held at Finish Mapping.
- * A fitted circle removes the magnetic field fixed to the assembly.
+ * Calibrates magnetic north before SLAM starts. The user rotates the whole
+ * phone/lidar assembly once and returns to the calibration start pose. A fitted
+ * circle removes the magnetic field fixed to the assembly. The fitted bias can
+ * then be applied again at the exact moment mapping starts.
  */
-class PostMappingNorthCalibrator {
+class MagneticNorthCalibrator {
     data class Result(
         val isReady: Boolean = false,
         val correctedHeadingRadians: Float = 0f,
@@ -32,7 +33,7 @@ class PostMappingNorthCalibrator {
     private data class Sample(
         val right: Double,
         val forward: Double,
-        val yawFromFinish: Double
+        val yawFromStart: Double
     )
 
     private data class Circle(
@@ -46,7 +47,7 @@ class PostMappingNorthCalibrator {
     private var active = false
     private var lastGyroscopeTimestampNs = 0L
     private var lastMagneticTimestampNs = 0L
-    private var yawFromFinish = 0.0
+    private var yawFromStart = 0.0
     private var accumulatedRotation = 0.0
     private var saturatedSamples = 0
 
@@ -56,7 +57,7 @@ class PostMappingNorthCalibrator {
         active = true
         lastGyroscopeTimestampNs = 0L
         lastMagneticTimestampNs = 0L
-        yawFromFinish = 0.0
+        yawFromStart = 0.0
         accumulatedRotation = 0.0
         saturatedSamples = 0
     }
@@ -90,7 +91,7 @@ class PostMappingNorthCalibrator {
             gyroX * gravityX + gyroY * gravityY + gyroZ * gravityZ
             ) / gravityMagnitude
         val deltaYaw = yawRate * deltaSeconds
-        yawFromFinish += deltaYaw
+        yawFromStart += deltaYaw
         accumulatedRotation += abs(deltaYaw)
     }
 
@@ -109,13 +110,13 @@ class PostMappingNorthCalibrator {
         }
         val projected = projectToHorizontal(state) ?: return
         if (samples.size == MAX_SAMPLES) samples.removeAt(0)
-        samples += Sample(projected.first, projected.second, yawFromFinish)
+        samples += Sample(projected.first, projected.second, yawFromStart)
     }
 
     @Synchronized
     fun getResult(): Result {
         val rotationDegrees = Math.toDegrees(accumulatedRotation).toFloat()
-        val returnErrorDegrees = Math.toDegrees(abs(normalizeSigned(yawFromFinish))).toFloat()
+        val returnErrorDegrees = Math.toDegrees(abs(normalizeSigned(yawFromStart))).toFloat()
         val saturated = saturatedSamples >= MIN_SATURATED_SAMPLES &&
             saturatedSamples * 4 >= max(1, saturatedSamples + samples.size)
         if (saturated) {
@@ -146,7 +147,7 @@ class PostMappingNorthCalibrator {
         }
         val coverage = angularCoverageDegrees(correctedAngles)
         val anchorSamples = samples.filter {
-            abs(normalizeSigned(it.yawFromFinish)) <= ANCHOR_YAW_TOLERANCE_RAD
+            abs(normalizeSigned(it.yawFromStart)) <= ANCHOR_YAW_TOLERANCE_RAD
         }
         var sinSum = 0.0
         var cosSum = 0.0
@@ -168,7 +169,7 @@ class PostMappingNorthCalibrator {
         val reason = when {
             rotationDegrees < MIN_ROTATION_DEGREES -> "请继续旋转整套设备"
             coverage < MIN_MAGNETIC_COVERAGE_DEGREES -> "磁场方向覆盖不足，请继续缓慢旋转"
-            returnErrorDegrees > MAX_RETURN_ERROR_DEGREES -> "请转回点击结束建图时的朝向"
+            returnErrorDegrees > MAX_RETURN_ERROR_DEGREES -> "请转回开始校准时的朝向"
             anchorSamples.size < MIN_ANCHOR_SAMPLES -> "请在起始朝向短暂停留"
             circle.radius < MIN_FIELD_RADIUS_UT -> "扣除固定磁场后地磁信号过弱"
             circle.residual > residualLimit -> "旋转期间磁场变化过大，请保持设备水平并重试"
@@ -187,6 +188,22 @@ class PostMappingNorthCalibrator {
             isSaturated = false,
             failureReason = reason
         )
+    }
+
+    /** Returns the current corrected heading using a completed calibration. */
+    fun correctedHeadingRadians(
+        state: MagneticHeadingState,
+        calibration: Result
+    ): Float? {
+        if (!calibration.isReady) return null
+        val projected = projectToHorizontal(state) ?: return null
+        val right = projected.first - calibration.biasRightMicroTesla
+        val forward = projected.second - calibration.biasForwardMicroTesla
+        if (!right.isFinite() || !forward.isFinite() ||
+            hypot(right, forward) < MIN_FIELD_RADIUS_UT) {
+            return null
+        }
+        return normalizeRadians(atan2(-right, forward)).toFloat()
     }
 
     private fun projectToHorizontal(state: MagneticHeadingState): Pair<Double, Double>? {

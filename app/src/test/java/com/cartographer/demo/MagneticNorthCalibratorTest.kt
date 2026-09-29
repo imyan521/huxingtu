@@ -7,10 +7,10 @@ import kotlin.math.PI
 import kotlin.math.cos
 import kotlin.math.sin
 
-class PostMappingNorthCalibratorTest {
+class MagneticNorthCalibratorTest {
     @Test
     fun removesFixedMagnetAfterFullTurnAndReturn() {
-        val calibrator = PostMappingNorthCalibrator()
+        val calibrator = MagneticNorthCalibrator()
         calibrator.begin()
         var timestamp = 1_000_000_000L
         calibrator.addGyroscopeSample(timestamp, 0f, 0f, 0f, 0f, 0f, 9.81f)
@@ -48,8 +48,8 @@ class PostMappingNorthCalibratorTest {
     }
 
     @Test
-    fun requiresReturnToFinishHeading() {
-        val calibrator = PostMappingNorthCalibrator()
+    fun requiresReturnToCalibrationStartHeading() {
+        val calibrator = MagneticNorthCalibrator()
         calibrator.begin()
         var timestamp = 1_000_000_000L
         calibrator.addGyroscopeSample(timestamp, 0f, 0f, 0f, 0f, 0f, 9.81f)
@@ -72,6 +72,43 @@ class PostMappingNorthCalibratorTest {
         val result = calibrator.getResult()
         assertTrue(!result.isReady)
         assertTrue(result.returnErrorDegrees > 12f)
+    }
+
+    @Test
+    fun appliesSavedBiasAtMappingStartHeading() {
+        val calibrator = MagneticNorthCalibrator()
+        calibrator.begin()
+        var timestamp = 1_000_000_000L
+        calibrator.addGyroscopeSample(timestamp, 0f, 0f, 0f, 0f, 0f, 9.81f)
+        val stepSeconds = 0.04
+        val stepRadians = Math.toRadians(2.0)
+        for (degrees in 0..360 step 2) {
+            val yaw = Math.toRadians(degrees.toDouble())
+            timestamp += (stepSeconds * 1_000_000_000L).toLong()
+            calibrator.addGyroscopeSample(
+                timestamp, 0f, 0f, (-stepRadians / stepSeconds).toFloat(), 0f, 0f, 9.81f
+            )
+            calibrator.addMagneticSample(
+                magneticState(
+                    timestamp,
+                    (220.0 - 34.0 * sin(yaw)).toFloat(),
+                    (-140.0 + 34.0 * cos(yaw)).toFloat()
+                )
+            )
+        }
+        val calibration = calibrator.getResult()
+        assertTrue(calibration.failureReason, calibration.isReady)
+
+        val mappingStartHeading = Math.toRadians(117.0)
+        val currentState = magneticState(
+            timestamp + 1,
+            (220.0 - 34.0 * sin(mappingStartHeading)).toFloat(),
+            (-140.0 + 34.0 * cos(mappingStartHeading)).toFloat()
+        )
+        val corrected = calibrator.correctedHeadingRadians(currentState, calibration)
+
+        assertTrue(corrected != null)
+        assertAngleEquals(mappingStartHeading, corrected!!.toDouble(), Math.toRadians(1.0))
     }
 
     private fun magneticState(timestamp: Long, x: Float, y: Float) = MagneticHeadingState(
