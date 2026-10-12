@@ -65,6 +65,10 @@ JNIEXPORT jdoubleArray JNICALL
 Java_com_cartographer_demo_CartographerNative_nativeGetTrajectoryNodePoses(
         JNIEnv* env, jobject thiz, jlong native_handle);
 
+JNIEXPORT jdoubleArray JNICALL
+Java_com_cartographer_demo_CartographerNative_nativeGetTrajectoryNodePoseSamples(
+        JNIEnv* env, jobject thiz, jlong native_handle, jint trajectory_id);
+
 JNIEXPORT jboolean JNICALL
 Java_com_cartographer_demo_CartographerNative_nativeSerializeState(
         JNIEnv* env, jobject thiz, jlong native_handle, jstring filename,

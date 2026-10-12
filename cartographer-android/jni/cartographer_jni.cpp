@@ -830,6 +830,45 @@ CartographerNativeGetTrajectoryNodePoses(
     return arr;
 }
 
+extern "C" JNIEXPORT jdoubleArray JNICALL
+CartographerNativeGetTrajectoryNodePoseSamples(
+        JNIEnv* env, jobject thiz, jlong handle, jint trajectory_id)
+{
+    auto* w = reinterpret_cast<CartographerWrapper*>(handle);
+    if (!w || !w->map_builder || trajectory_id < 0) {
+        return env->NewDoubleArray(0);
+    }
+
+    std::lock_guard<std::mutex> lock(w->data_mutex);
+    auto* pose_graph = w->map_builder->pose_graph();
+    if (pose_graph == nullptr) {
+        return env->NewDoubleArray(0);
+    }
+
+    const auto node_poses = pose_graph->GetTrajectoryNodePoses();
+    std::vector<jdouble> output;
+    output.reserve(node_poses.size() * 4);
+    for (const auto& id_data : node_poses) {
+        if (id_data.id.trajectory_id != trajectory_id ||
+            !id_data.data.constant_pose_data.has_value()) {
+            continue;
+        }
+        const auto& pose = id_data.data.global_pose;
+        output.push_back(static_cast<jdouble>(
+                common::ToUniversal(id_data.data.constant_pose_data->time)) * 100.0);
+        output.push_back(pose.translation().x());
+        output.push_back(pose.translation().y());
+        output.push_back(YawFromQuaternion(pose.rotation()));
+    }
+
+    jdoubleArray arr = env->NewDoubleArray(output.size());
+    if (arr == nullptr || output.empty()) {
+        return arr;
+    }
+    env->SetDoubleArrayRegion(arr, 0, output.size(), output.data());
+    return arr;
+}
+
 extern "C" JNIEXPORT void JNICALL
 CartographerNativeFinishTrajectory(
         JNIEnv* env, jobject thiz, jlong handle, jint tid)
@@ -933,6 +972,7 @@ const JNINativeMethod kCartographerMethods[] = {
         {const_cast<char*>("nativeGetActiveSubmapTextures"), const_cast<char*>("(J)[[I"), reinterpret_cast<void*>(CartographerNativeGetActiveSubmapTextures)},
         {const_cast<char*>("nativeGetSubmapTextures"), const_cast<char*>("(J)[[I"), reinterpret_cast<void*>(CartographerNativeGetSubmapTextures)},
         {const_cast<char*>("nativeGetTrajectoryNodePoses"), const_cast<char*>("(J)[D"), reinterpret_cast<void*>(CartographerNativeGetTrajectoryNodePoses)},
+        {const_cast<char*>("nativeGetTrajectoryNodePoseSamples"), const_cast<char*>("(JI)[D"), reinterpret_cast<void*>(CartographerNativeGetTrajectoryNodePoseSamples)},
         {const_cast<char*>("nativeSerializeState"), const_cast<char*>("(JLjava/lang/String;Z)Z"), reinterpret_cast<void*>(CartographerNativeSerializeState)},
         {const_cast<char*>("nativeLoadMap"), const_cast<char*>("(JLjava/lang/String;Z)Z"), reinterpret_cast<void*>(CartographerNativeLoadMap)},
         {const_cast<char*>("nativeFinishTrajectory"), const_cast<char*>("(JI)V"), reinterpret_cast<void*>(CartographerNativeFinishTrajectory)},

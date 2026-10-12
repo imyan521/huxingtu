@@ -130,6 +130,31 @@ class CartographerNative {
         return out
     }
 
+    fun getTrajectoryNodePoseSamples(): List<TrajectoryNodePose2D> {
+        if (nativeHandle == 0L) return emptyList()
+        val trajectoryId = if (currentTrajectoryId >= 0) {
+            currentTrajectoryId
+        } else {
+            lastFinishedTrajectoryId
+        }
+        if (trajectoryId < 0) return emptyList()
+        val values = nativeGetTrajectoryNodePoseSamples(nativeHandle, trajectoryId)
+        if (values.size < 4) return emptyList()
+        val output = ArrayList<TrajectoryNodePose2D>(values.size / 4)
+        var index = 0
+        while (index + 3 < values.size) {
+            output += TrajectoryNodePose2D(
+                timestampNs = values[index].toLong(),
+                x = values[index + 1],
+                y = values[index + 2],
+                theta = values[index + 3]
+            )
+            index += 4
+        }
+        output.sortBy { it.timestampNs }
+        return output
+    }
+
     @Synchronized
     fun finishTrajectory() {
         if (nativeHandle == 0L || currentTrajectoryId < 0) return
@@ -182,6 +207,10 @@ class CartographerNative {
     private external fun nativeGetActiveSubmapTextures(handle: Long): Array<IntArray>
     private external fun nativeGetSubmapTextures(handle: Long): Array<IntArray>
     private external fun nativeGetTrajectoryNodePoses(handle: Long): DoubleArray
+    private external fun nativeGetTrajectoryNodePoseSamples(
+        handle: Long,
+        trajectoryId: Int
+    ): DoubleArray
     private external fun nativeSerializeState(
         handle: Long,
         path: String,
@@ -277,6 +306,12 @@ data class Pose3D(val position: Triple<Double, Double, Double>, val orientation:
 }
 
 data class Pose2D(val x: Double, val y: Double, val theta: Double)
+data class TrajectoryNodePose2D(
+    val timestampNs: Long,
+    val x: Double,
+    val y: Double,
+    val theta: Double
+)
 data class Quaternion(val w: Double, val x: Double, val y: Double, val z: Double) {
     fun toEulerAngles(): Triple<Double, Double, Double> {
         val yaw = kotlin.math.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
