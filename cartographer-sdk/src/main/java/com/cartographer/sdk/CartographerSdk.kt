@@ -24,6 +24,10 @@ import com.cartographer.demo.FloorPlanPixelPoint
 import com.cartographer.demo.FusedMapRenderer
 import com.cartographer.demo.HeatMapCoverageCalculator
 import com.cartographer.demo.LidarParser
+import com.cartographer.demo.MagneticHeadingProvider
+import com.cartographer.demo.MapMetadataStore
+import com.cartographer.demo.MapNorthAlignment
+import com.cartographer.demo.OnlineMagneticNorthCalibrator
 import com.cartographer.demo.RssiSample
 import com.hoho.android.usbserial.driver.UsbSerialPort
 import com.hoho.android.usbserial.driver.UsbSerialProber
@@ -50,6 +54,8 @@ class CartographerSdk private constructor(
     private val native = CartographerNative()
     private val floorPlan = FloorPlanNative()
     private val parser = LidarParser(native)
+    private val magneticHeadingProvider = MagneticHeadingProvider(sensorManager)
+    private val magneticNorthCalibrator = OnlineMagneticNorthCalibrator()
     private val closed = AtomicBoolean(false)
     private val mapping = AtomicBoolean(false)
     private val sensorsRunning = AtomicBoolean(false)
@@ -64,6 +70,9 @@ class CartographerSdk private constructor(
     private var hasGyroscope = false
     private var lastImuTimestampNs = 0L
     private var lastPublishedScanTimestampNs = 0L
+    @Volatile private var latestMagneticCalibration = MagneticCalibrationStatus()
+    @Volatile private var magneticNorthAlignment: MagneticNorthAlignment? = null
+    @Volatile private var mappingUsesExistingNorthAlignment = false
 
     private val eventReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -136,9 +145,28 @@ class CartographerSdk private constructor(
         if (!mapping.compareAndSet(false, true)) return SdkResult.failure(SdkError.ALREADY_MAPPING, "Mapping already started")
         val accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         val gyroscopeSensor = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
-        if (accelerometer == null || gyroscopeSensor == null) {
+        mappingUsesExistingNorthAlignment = magneticNorthAlignment != null
+        if (accelerometer == null || gyroscopeSensor == null ||
+            (!mappingUsesExistingNorthAlignment && !magneticHeadingProvider.isSupported)) {
             mapping.set(false)
-            return SdkResult.failure(SdkError.SENSOR_UNAVAILABLE, "Accelerometer or gyroscope unavailable")
+            return SdkResult.failure(
+                SdkError.SENSOR_UNAVAILABLE,
+                "Accelerometer, gyroscope, or magnetometer unavailable"
+            )
+        }
+        if (mappingUsesExistingNorthAlignment) {
+            latestMagneticCalibration = MagneticCalibrationStatus(
+                isReady = true,
+                reason = "Using magnetic north alignment from the existing map"
+            )
+        } else {
+            magneticNorthCalibrator.reset()
+            latestMagneticCalibration = MagneticCalibrationStatus()
+            magneticHeadingProvider.beginCalibration()
+            if (!magneticHeadingProvider.start()) {
+                mapping.set(false)
+                return SdkResult.failure(SdkError.SENSOR_UNAVAILABLE, "Magnetometer registration failed")
+            }
         }
         native.startTrajectory()
         hasAcceleration = false
@@ -155,10 +183,52 @@ class CartographerSdk private constructor(
 
     fun stopMapping(): SdkResult {
         if (closed.get()) return SdkResult.failure(SdkError.CLOSED, "SDK is closed")
-        if (!mapping.compareAndSet(true, false)) return SdkResult.failure(SdkError.NOT_MAPPING, "Mapping is not running")
+        if (!mapping.get()) return SdkResult.failure(SdkError.NOT_MAPPING, "Mapping is not running")
+        val liveResult = if (mappingUsesExistingNorthAlignment) null else {
+            captureMagneticCalibrationSample()
+            magneticNorthCalibrator.getResult().also {
+                latestMagneticCalibration = it.toSdkStatus()
+            }
+        }
+        if (!mappingUsesExistingNorthAlignment && liveResult?.isReady != true) {
+            return SdkResult.failure(
+                SdkError.MAGNETIC_CALIBRATION_INCOMPLETE,
+                "${liveResult?.failureReason ?: "Magnetic calibration unavailable"}; " +
+                    "heading coverage ${"%.0f".format(
+                        java.util.Locale.US,
+                        liveResult?.headingCoverageDegrees ?: 0f
+                    )}°"
+            )
+        }
+        if (!mapping.compareAndSet(true, false)) {
+            return SdkResult.failure(SdkError.NOT_MAPPING, "Mapping is not running")
+        }
         stopSensors()
+        magneticHeadingProvider.stop()
         worker.execute {
             native.finishTrajectory()
+            val alignment = if (mappingUsesExistingNorthAlignment) {
+                requireNotNull(magneticNorthAlignment)
+            } else {
+                val optimizedResult = magneticNorthCalibrator.getResult(
+                    native.getTrajectoryNodePoseSamples()
+                )
+                val finalResult = if (optimizedResult.isReady) {
+                    optimizedResult
+                } else {
+                    requireNotNull(liveResult)
+                }
+                latestMagneticCalibration = finalResult.toSdkStatus()
+                val headingState = magneticHeadingProvider.getState()
+                MagneticNorthAlignment(
+                    magneticNorthYawRadians = finalResult.magneticNorthYawRadians,
+                    headingAccuracy = headingState.accuracy,
+                    sampleTimestampNs = headingState.timestampNs,
+                    isHighInterference = finalResult.isHighInterference
+                )
+            }
+            magneticNorthAlignment = alignment
+            post { listener.onMagneticNorthAlignment(alignment) }
             post { listener.onMappingStateChanged(MappingState.FINISHED) }
         }
         return SdkResult.success()
@@ -167,8 +237,23 @@ class CartographerSdk private constructor(
     fun saveMap(output: File, includeUnfinishedSubmaps: Boolean = false, callback: (SdkResult) -> Unit) {
         executeFileOperation(callback) {
             output.parentFile?.mkdirs()
-            if (native.saveMap(output.absolutePath, includeUnfinishedSubmaps)) SdkResult.success()
-            else SdkResult.failure(SdkError.IO_ERROR, "Map could not be saved")
+            if (!native.saveMap(output.absolutePath, includeUnfinishedSubmaps)) {
+                SdkResult.failure(SdkError.IO_ERROR, "Map could not be saved")
+            } else {
+                val alignment = magneticNorthAlignment
+                if (alignment == null || MapMetadataStore.save(
+                        output,
+                        MapNorthAlignment(
+                            magneticNorthYawRadians = alignment.magneticNorthYawRadians,
+                            headingAccuracy = alignment.headingAccuracy,
+                            sampleTimestampNs = alignment.sampleTimestampNs
+                        )
+                    )) {
+                    SdkResult.success()
+                } else {
+                    SdkResult.failure(SdkError.IO_ERROR, "Map saved but magnetic north metadata failed")
+                }
+            }
         }
     }
 
@@ -177,7 +262,16 @@ class CartographerSdk private constructor(
             when {
                 mapping.get() -> SdkResult.failure(SdkError.ALREADY_MAPPING, "Stop mapping before loading")
                 !input.isFile -> SdkResult.failure(SdkError.IO_ERROR, "Map file does not exist")
-                native.loadMap(input.absolutePath, true) -> SdkResult.success()
+                native.loadMap(input.absolutePath, true) -> {
+                    magneticNorthAlignment = MapMetadataStore.load(input)?.let {
+                        MagneticNorthAlignment(
+                            magneticNorthYawRadians = it.magneticNorthYawRadians,
+                            headingAccuracy = it.headingAccuracy,
+                            sampleTimestampNs = it.sampleTimestampNs
+                        )
+                    }
+                    SdkResult.success()
+                }
                 else -> SdkResult.failure(SdkError.IO_ERROR, "Map could not be loaded")
             }
         }
@@ -218,6 +312,38 @@ class CartographerSdk private constructor(
             val points = native.getTrajectoryNodePoses().map { PosePoint(it.x, it.y) }
             post { callback(points) }
         }
+        return SdkResult.success()
+    }
+
+    /** Returns timestamped optimized trajectory nodes. Callback runs on the main thread. */
+    fun getTrajectoryNodePoseSamples(
+        callback: (List<TrajectoryNodePoseSample>) -> Unit
+    ): SdkResult {
+        if (closed.get()) return SdkResult.failure(SdkError.CLOSED, "SDK is closed")
+        worker.execute {
+            val samples = native.getTrajectoryNodePoseSamples().map {
+                TrajectoryNodePoseSample(it.timestampNs, it.x, it.y, it.theta)
+            }
+            post { callback(samples) }
+        }
+        return SdkResult.success()
+    }
+
+    /** Returns current online calibration quality without stopping mapping. */
+    fun getMagneticCalibrationStatus(
+        callback: (MagneticCalibrationStatus) -> Unit
+    ): SdkResult {
+        if (closed.get()) return SdkResult.failure(SdkError.CLOSED, "SDK is closed")
+        post { callback(latestMagneticCalibration) }
+        return SdkResult.success()
+    }
+
+    /** Returns the final magnetic-north alignment after MappingState.FINISHED. */
+    fun getMagneticNorthAlignment(
+        callback: (MagneticNorthAlignment?) -> Unit
+    ): SdkResult {
+        if (closed.get()) return SdkResult.failure(SdkError.CLOSED, "SDK is closed")
+        post { callback(magneticNorthAlignment) }
         return SdkResult.success()
     }
 
@@ -354,6 +480,7 @@ class CartographerSdk private constructor(
         if (!closed.compareAndSet(false, true)) return
         mapping.set(false)
         stopSensors()
+        magneticHeadingProvider.stop()
         disconnectInternal(notify = false)
         if (receiverRegistered) {
             runCatching { appContext.unregisterReceiver(eventReceiver) }
@@ -451,6 +578,11 @@ class CartographerSdk private constructor(
             override fun run() {
                 if (!mapping.get() || closed.get()) return
                 val pose = native.getCurrentPose()?.to2D()
+                if (pose != null && !mappingUsesExistingNorthAlignment) {
+                    val magneticState = magneticHeadingProvider.getState()
+                    magneticNorthCalibrator.addSample(magneticState, pose)
+                    latestMagneticCalibration = magneticNorthCalibrator.getResult().toSdkStatus()
+                }
                 val status = native.getStatus()
                 listener.onSnapshot(
                     SdkSnapshot(
@@ -458,7 +590,8 @@ class CartographerSdk private constructor(
                         rangeFrames = status.rangeFrames,
                         imuSamples = status.imuSamples,
                         insertedNodes = status.insertedNodes,
-                        hasPose = status.hasPose
+                        hasPose = status.hasPose,
+                        magneticCalibration = latestMagneticCalibration
                     )
                 )
                 mainHandler.postDelayed(this, config.snapshotIntervalMs)
@@ -487,6 +620,23 @@ class CartographerSdk private constructor(
     private fun stopSensors() {
         if (sensorsRunning.compareAndSet(true, false)) sensorManager.unregisterListener(this)
     }
+
+    private fun captureMagneticCalibrationSample() {
+        val pose = native.getCurrentPose()?.to2D() ?: return
+        magneticNorthCalibrator.addSample(magneticHeadingProvider.getState(), pose)
+    }
+
+    private fun OnlineMagneticNorthCalibrator.Result.toSdkStatus() = MagneticCalibrationStatus(
+        isReady = isReady,
+        reason = failureReason,
+        sampleCount = sampleCount,
+        inlierCount = inlierCount,
+        headingCoverageDegrees = headingCoverageDegrees,
+        residualMicroTesla = residualMicroTesla,
+        horizontalFieldMicroTesla = horizontalFieldMicroTesla,
+        isHighInterference = isHighInterference,
+        usesThreeDimensionalBias = usesThreeDimensionalBias
+    )
 
     private fun findSupportedDevice(): UsbDevice? =
         usbManager.deviceList.values.firstOrNull(::isSupported)
@@ -712,7 +862,7 @@ class CartographerSdk private constructor(
         else getParcelableExtra(UsbManager.EXTRA_DEVICE)
 
     companion object {
-        const val SDK_VERSION = "1.1.0"
+        const val SDK_VERSION = "1.2.0"
         const val SUPPORTED_VENDOR_ID = 0x1A86
         const val SUPPORTED_PRODUCT_ID = 0x7523
         private const val BAUD_RATE = 230400
@@ -747,6 +897,7 @@ interface CartographerListener {
     fun onMappingStateChanged(state: MappingState) = Unit
     fun onLidarScan(scan: LidarScan) = Unit
     fun onSnapshot(snapshot: SdkSnapshot) = Unit
+    fun onMagneticNorthAlignment(alignment: MagneticNorthAlignment) = Unit
     fun onError(code: SdkError, message: String, cause: Throwable?) = Unit
 }
 
@@ -759,7 +910,7 @@ enum class SdkError {
     CLOSED, NOT_INITIALIZED, INITIALIZATION_FAILED, CONFIGURATION_ERROR,
     DEVICE_NOT_FOUND, PERMISSION_REQUIRED, PERMISSION_DENIED, DEVICE_DETACHED,
     SERIAL_ERROR, PROTOCOL_ERROR, SENSOR_UNAVAILABLE, ALREADY_MAPPING, NOT_MAPPING,
-    IO_ERROR, FINAL_MAP_FAILED, FLOOR_PLAN_FAILED
+    MAGNETIC_CALIBRATION_INCOMPLETE, IO_ERROR, FINAL_MAP_FAILED, FLOOR_PLAN_FAILED
 }
 
 data class SdkResult(val isSuccess: Boolean, val error: SdkError? = null, val message: String? = null) {
@@ -776,10 +927,41 @@ data class SdkSnapshot(
     val rangeFrames: Long,
     val imuSamples: Long,
     val insertedNodes: Long,
-    val hasPose: Boolean
+    val hasPose: Boolean,
+    val magneticCalibration: MagneticCalibrationStatus = MagneticCalibrationStatus()
 )
 
 data class PosePoint(val x: Float, val y: Float)
+
+data class TrajectoryNodePoseSample(
+    val timestampNs: Long,
+    val x: Double,
+    val y: Double,
+    val theta: Double
+)
+
+data class MagneticCalibrationStatus(
+    val isReady: Boolean = false,
+    val reason: String = "Waiting for mapping data",
+    val sampleCount: Int = 0,
+    val inlierCount: Int = 0,
+    val headingCoverageDegrees: Float = 0f,
+    val residualMicroTesla: Float = Float.POSITIVE_INFINITY,
+    val horizontalFieldMicroTesla: Float = 0f,
+    val isHighInterference: Boolean = false,
+    val usesThreeDimensionalBias: Boolean = false
+)
+
+data class MagneticNorthAlignment(
+    val magneticNorthYawRadians: Float,
+    val headingAccuracy: Int,
+    val sampleTimestampNs: Long,
+    val isHighInterference: Boolean = false
+) {
+    /** Clockwise bitmap rotation used by the reference app: left=south, right=north. */
+    val floorPlanRotationDegrees: Float
+        get() = Math.toDegrees(magneticNorthYawRadians.toDouble()).toFloat()
+}
 
 data class SubmapTexture(
     val width: Int,

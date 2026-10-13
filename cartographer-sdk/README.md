@@ -1,4 +1,4 @@
-# Cartographer Device SDK 1.0.0
+# Cartographer Device SDK 1.2.0
 
 Closed-source Android SDK for the supported CH340 lidar. The SDK owns USB permission/serial I/O,
 phone IMU collection, lidar frame parsing, SLAM, map persistence, relocalization primitives and
@@ -28,7 +28,7 @@ dependencies {
 When published to the private Maven repository, use:
 
 ```kotlin
-implementation("com.cartographer:device-sdk:1.0.0")
+implementation("com.cartographer:device-sdk:1.2.0")
 ```
 
 ## Lifecycle
@@ -46,8 +46,10 @@ For a custom UI, use the lower-level lifecycle below.
 2. Call `requestUsbPermission(activity)` from a visible Activity.
 3. After permission succeeds, call `connect()`.
 4. Call `startMapping()` and consume listener snapshots/scans on the main thread.
-5. Call `stopMapping()`, then save/load maps or generate a floor plan as needed.
-6. Call `close()` when the owning application scope is destroyed.
+5. During mapping, watch `SdkSnapshot.magneticCalibration`. Walk through at least one clear corner.
+6. Call `stopMapping()`. It returns `MAGNETIC_CALIBRATION_INCOMPLETE` while more valid motion is needed.
+7. After `FINISHED`, read `MagneticNorthAlignment`, then save/load maps or generate a floor plan.
+8. Call `close()` when the owning application scope is destroyed.
 
 The SDK dynamically registers USB receivers and does not install an Activity or Application class.
 All listener methods and file-operation callbacks run on the Android main thread.
@@ -74,6 +76,36 @@ sdk.generateFloorPlan(output, workDir, heatMapSamples) { result, floorPlan ->
 within 1.5 metres of the valid sampled route divided by the usable area inside the fitted outline.
 Occupied wall cells block propagation, samples separated by more than three seconds or three metres
 are not joined, and repeated passes do not increase the covered area.
+
+## Magnetic north alignment
+
+For a new map, the SDK collects magnetometer, gravity, and SLAM poses while the operator walks. It
+fits the fixed magnetic bias from the lidar magnet, then refits against the final optimized
+trajectory when mapping ends. No separate compass-button step is required.
+
+```kotlin
+override fun onSnapshot(snapshot: SdkSnapshot) {
+    val calibration = snapshot.magneticCalibration
+    statusText.text = "${calibration.reason}, coverage=${calibration.headingCoverageDegrees}°"
+}
+
+override fun onMagneticNorthAlignment(alignment: MagneticNorthAlignment) {
+    // Clockwise image rotation matching the reference UI: left=south, right=north.
+    val floorPlanRotation = alignment.floorPlanRotationDegrees
+}
+```
+
+`stopMapping()` keeps the trajectory running when calibration is not ready and returns
+`SdkError.MAGNETIC_CALIBRATION_INCOMPLETE`. A normal corner with roughly 90 degrees of heading
+coverage is sufficient. Moderate interference is reported through `isHighInterference` but does
+not prevent completion. Once a usable fit exists, short later disturbances retain that fit.
+
+`saveMap()` writes a sibling `*.metadata.json` file containing the magnetic-north direction.
+`loadMap()` restores it, and continuation mapping keeps the existing map direction. Use
+`getMagneticNorthAlignment()` to read it at any time after `FINISHED` or a successful load.
+
+Timestamped final optimized nodes are available through `getTrajectoryNodePoseSamples()`; each
+`TrajectoryNodePoseSample` contains `timestampNs`, `x`, `y`, and `theta`.
 
 ## Release
 
