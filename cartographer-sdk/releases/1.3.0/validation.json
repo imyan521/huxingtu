@@ -1,0 +1,20 @@
+{
+  "sdk_version": "1.3.0",
+  "default_mode": "LIDAR_IMU",
+  "optional_mode": "LIDAR_ONLY",
+  "supported_lidar": "CH340 1A86:7523, 230400 8N1",
+  "kld42_hardware_protocol_ported": false,
+  "phone_unit_tests": 24,
+  "sdk_unit_tests": 1,
+  "test_failures": 0,
+  "lua_profiles_executed": 4,
+  "existing_sdk_named_methods_and_model_constructors_retained": 374,
+  "existing_sdk_asset_files_unchanged": 9,
+  "pure_mode_asset_files_match_phone": 11,
+  "independent_consumer_kotlin_and_java_build": "passed",
+  "aar_release_structure_verification": "passed",
+  "phone_apk_zip_alignment_and_v2_signature": "passed",
+  "on_device_radar_tests": "not run",
+  "sdk_aar_sha256": "c6fa5918a6247fabaa57db007b7face85133eae454291dc87900f0eb6beb9327",
+  "source_backup": "/home/cxz/Cartographer-Android0/outputs/before-lidar-only-port-20261120-150558"
+}
