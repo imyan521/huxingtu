@@ -1,21 +1,43 @@
 package com.cartographer.demo
 
 import android.graphics.PointF
+import android.os.SystemClock
+import android.util.Log
+import java.io.File
 
 class CartographerNative {
 
     private var nativeHandle: Long = 0
     private var currentTrajectoryId: Int = -1
     private var lastFinishedTrajectoryId: Int = -1
+    private var recordingConfigDirectory: File? = null
+    @Volatile private var recorder: SlamSessionRecorder? = null
+    @Volatile private var imuInputEnabled = true
+    private var initializedConfiguration: String? = null
 
     init {
         System.loadLibrary("cartographer-jni")
     }
 
     @Synchronized
-    fun initialize(configDirectory: String, configBasename: String): Boolean {
-        if (nativeHandle != 0L) return true
+    fun initialize(configDirectory: String, configBasename: String): Boolean =
+        initialize(configDirectory, configBasename, useImuData = true)
+
+    @Synchronized
+    fun initialize(configDirectory: String, configBasename: String, useImuData: Boolean): Boolean {
+        val configuration = File(configDirectory, configBasename).absolutePath
+        if (nativeHandle != 0L) {
+            if (initializedConfiguration == configuration && imuInputEnabled == useImuData) return true
+            // Sensor registrations belong to the builder. Never replace an active trajectory.
+            if (currentTrajectoryId >= 0) return false
+            reset()
+        }
         nativeHandle = nativeInit(configDirectory, configBasename)
+        if (nativeHandle != 0L) {
+            recordingConfigDirectory = File(configDirectory)
+            initializedConfiguration = configuration
+            imuInputEnabled = useImuData
+        }
         return nativeHandle != 0L
     }
 
@@ -24,11 +46,35 @@ class CartographerNative {
     fun startTrajectory(): Int {
         if (currentTrajectoryId >= 0) return currentTrajectoryId
         currentTrajectoryId = nativeStartTrajectory(nativeHandle)
+        if (currentTrajectoryId >= 0) {
+            try {
+                recordingConfigDirectory?.let { config ->
+                    val destination = File(config.parentFile,
+                        "slam_sessions/${System.currentTimeMillis()}_${System.nanoTime()}")
+                    recorder = SlamSessionRecorder(destination, config)
+                    Log.i("SlamRecording", "记录目录：${destination.absolutePath}")
+                }
+            } catch (e: Exception) {
+                Log.w("SlamRecording", "无法启动数据记录，继续建图", e)
+            }
+        }
         return currentTrajectoryId
     }
 
+    fun recordUsbData(timestampNs: Long, bytes: ByteArray) {
+        recorder?.usb(timestampNs, bytes)
+    }
+
+    private fun stopRecording() {
+        val recording = recorder
+        recorder = null
+        recording?.stop()
+        recording?.failure?.let { Log.w("SlamRecording", "数据记录失败：$it") }
+    }
+
     fun addImuData(ts: Long, acc: FloatArray, gyro: FloatArray) {
-        if (currentTrajectoryId < 0) return
+        if (!imuInputEnabled || currentTrajectoryId < 0 || nativeHandle == 0L) return
+        recorder?.imu(ts, acc, gyro)
         nativeAddImuData(
             nativeHandle, currentTrajectoryId, ts,
             acc[0], acc[1], acc[2],
@@ -44,6 +90,7 @@ class CartographerNative {
         angles: FloatArray
     ) {
         if (currentTrajectoryId < 0 || nativeHandle == 0L) return
+        recorder?.scan(timestampNs, scanDurationSeconds, ranges, angles)
         nativeAddRangefinderData(
             nativeHandle,
             currentTrajectoryId,
@@ -57,6 +104,7 @@ class CartographerNative {
     fun getCurrentPose(): Pose3D? {
         if (currentTrajectoryId < 0 || nativeHandle == 0L) return null
         val arr = nativeGetPose(nativeHandle, currentTrajectoryId)
+        if (arr.size == 7) recorder?.pose(SystemClock.elapsedRealtimeNanos(), arr)
         return if (arr.size == 7) Pose3D.fromArray(arr) else null
     }
 
@@ -159,6 +207,7 @@ class CartographerNative {
     fun finishTrajectory() {
         if (nativeHandle == 0L || currentTrajectoryId < 0) return
         val trajectoryId = currentTrajectoryId
+        stopRecording()
         nativeFinishTrajectory(nativeHandle, trajectoryId)
         lastFinishedTrajectoryId = trajectoryId
         currentTrajectoryId = -1
@@ -177,10 +226,14 @@ class CartographerNative {
 
     @Synchronized
     fun reset() {
+        stopRecording()
         if (nativeHandle != 0L) {
             nativeDestroy(nativeHandle)
         }
         nativeHandle = 0L
+        initializedConfiguration = null
+        recordingConfigDirectory = null
+        imuInputEnabled = true
         currentTrajectoryId = -1
         lastFinishedTrajectoryId = -1
     }

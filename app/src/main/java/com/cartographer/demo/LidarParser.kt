@@ -33,6 +33,7 @@ class LidarParser(private val carto: CartographerNative) {
     var aa55PacketCount = 0L
     var invalidAa55PacketCount = 0L
     var droppedIncompleteScanCount = 0L
+    var droppedTimingScanCount = 0L
     var droppedByteCount = 0L
     var rejectedOutlierPointCount = 0L
     var activeProtocol = "AA55"
@@ -295,9 +296,13 @@ class LidarParser(private val carto: CartographerNative) {
                 predictedEndTimeNs + phaseErrorNs / TIMESTAMP_PHASE_DIVISOR
             )
         }
-        val scanDurationSeconds = filteredScanDurationNs
-            .coerceIn(MIN_SCAN_DURATION_NS, MAX_SCAN_DURATION_NS)
-            .toFloat() / 1_000_000_000f
+        val scanDurationSeconds = LidarScanTiming.durationSeconds(
+            filteredScanDurationNs, lastTimeNs, lastCompletedScanEndNs
+        ) ?: run {
+            droppedTimingScanCount++
+            clearCurrentScan()
+            return
+        }
         val filteredScan = LidarScanFilter.rejectIsolatedSpikes(
             scanRanges.toFloatArray(),
             scanAngles.toFloatArray()
@@ -331,6 +336,7 @@ class LidarParser(private val carto: CartographerNative) {
                     "周期：${"%.1f".format(scanDurationSeconds * 1000f)}ms " +
                     "AA55:$aa55PacketCount 异常包:$invalidAa55PacketCount " +
                     "残帧:$droppedIncompleteScanCount " +
+                    "时间异常帧:$droppedTimingScanCount " +
                     "丢弃字节:$droppedByteCount " +
                     "离群点:$rejectedOutlierPointCount"
             )

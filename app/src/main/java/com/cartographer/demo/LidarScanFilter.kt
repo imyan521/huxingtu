@@ -101,32 +101,51 @@ object LidarScanFilter {
             }
         }
 
-        // Long-range multipath/dark-surface echoes often arrive as a short
-        // cluster rather than one bad ray. Reject a far return when neither
-        // side of its small angular neighborhood supports the same surface.
-        // The comparison is radial (not Euclidean), so a real far wall with
-        // several consecutive samples survives while 1-3 ray "tails" do not.
+        // Lack of equal-range neighbors is not evidence of an outlier: real
+        // grazing walls change range quickly, and a doorway may border a
+        // missing sector. Require contradictory near-surface evidence on BOTH
+        // sides before removing an unsupported far return.
+        // Use a snapshot so rejecting one point cannot cascade down a wall.
+        val evidence = keep.copyOf()
         for (index in 0 until count) {
-            if (!keep[index] || ranges[index] < LONG_RANGE_CHECK_START_M) continue
+            if (!evidence[index] || ranges[index] < LONG_RANGE_CHECK_START_M) continue
             var supportedBefore = false
             var supportedAfter = false
-            for (offset in 1..LONG_RANGE_SUPPORT_RADIUS) {
+            var foregroundBefore = Float.NaN
+            var foregroundAfter = Float.NaN
+            for (offset in 1..minOf(LONG_RANGE_SUPPORT_RADIUS, count - 1)) {
                 val before = (index + count - offset) % count
                 val after = (index + offset) % count
                 val beforeGap = forwardAngleDelta(anglesDeg[before], anglesDeg[index])
                 val afterGap = forwardAngleDelta(anglesDeg[index], anglesDeg[after])
                 if (beforeGap <= LONG_RANGE_MAX_SUPPORT_ANGLE_DEG &&
-                    keep[before] &&
+                    evidence[before] &&
                     kotlin.math.abs(ranges[before] - ranges[index]) <= LONG_RANGE_RADIAL_TOLERANCE_M) {
                     supportedBefore = true
                 }
                 if (afterGap <= LONG_RANGE_MAX_SUPPORT_ANGLE_DEG &&
-                    keep[after] &&
+                    evidence[after] &&
                     kotlin.math.abs(ranges[after] - ranges[index]) <= LONG_RANGE_RADIAL_TOLERANCE_M) {
                     supportedAfter = true
                 }
+                if (beforeGap in MIN_ANGLE_GAP_DEG..LONG_RANGE_MAX_SUPPORT_ANGLE_DEG &&
+                    evidence[before] && ranges[before].isFinite() && ranges[before] > 0f &&
+                    ranges[index] - ranges[before] > LONG_RANGE_RADIAL_TOLERANCE_M) {
+                    foregroundBefore = if (foregroundBefore.isNaN()) ranges[before]
+                        else minOf(foregroundBefore, ranges[before])
+                }
+                if (afterGap in MIN_ANGLE_GAP_DEG..LONG_RANGE_MAX_SUPPORT_ANGLE_DEG &&
+                    evidence[after] && ranges[after].isFinite() && ranges[after] > 0f &&
+                    ranges[index] - ranges[after] > LONG_RANGE_RADIAL_TOLERANCE_M) {
+                    foregroundAfter = if (foregroundAfter.isNaN()) ranges[after]
+                        else minOf(foregroundAfter, ranges[after])
+                }
             }
-            if (!supportedBefore && !supportedAfter) keep[index] = false
+            if (!supportedBefore && !supportedAfter &&
+                foregroundBefore.isFinite() && foregroundAfter.isFinite() &&
+                kotlin.math.abs(foregroundBefore - foregroundAfter) <= LONG_RANGE_RADIAL_TOLERANCE_M) {
+                keep[index] = false
+            }
         }
 
         val rejected = keep.count { !it }

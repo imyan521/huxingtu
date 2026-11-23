@@ -1,4 +1,5 @@
 #include "cartographer_jni.h"
+#include "lidar_point_timing.h"
 #include <atomic>
 #include <memory>
 #include <mutex>
@@ -398,28 +399,14 @@ CartographerNativeAddRangefinderData(
     cartographer::sensor::TimedPointCloud point_cloud;
     point_cloud.reserve(count);
 
-    // Ranges outside the usable interval have already been omitted by the
-    // Android parser. Derive acquisition progress from the original lidar
-    // angles instead of the compacted array index: otherwise a missing sector
-    // is assigned almost no time and deskew bends walls while turning. D6
-    // samples arrive in increasing counter-clockwise angle order.
-    std::vector<float> acquisition_progress(count, 0.f);
-    float total_angular_travel = 0.f;
-    for (int i = 1; i < count; ++i) {
-        float delta_degrees = angles_ptr[i] - angles_ptr[i - 1];
-        while (delta_degrees < 0.f) delta_degrees += 360.f;
-        while (delta_degrees >= 360.f) delta_degrees -= 360.f;
-        // Isolated corrupt angles must not consume most of a revolution.
-        if (delta_degrees <= 45.f) total_angular_travel += delta_degrees;
-        acquisition_progress[i] = total_angular_travel;
-    }
-    const bool has_reliable_angular_progress = total_angular_travel > 180.f;
-
     for (int i = 0; i < count; ++i) {
         float r = ranges_ptr[i];
         if (!std::isfinite(r) || r < kMinUsableRangeMeters || r > kMaxUsableRangeMeters) {
             continue;
         }
+        const float point_time_offset = LidarPointOffsetFromBoundary(angles_ptr[i], scan_duration);
+        if (!std::isfinite(point_time_offset)) continue;
+        if (!point_cloud.empty() && point_time_offset < point_cloud.back().time) continue;
         float a = static_cast<float>(angles_ptr[i] * kPi / 180.0);
 
         const Eigen::Vector3d point_lidar(
@@ -428,18 +415,13 @@ CartographerNativeAddRangefinderData(
                 0.0);
         const Eigen::Vector3d point_tracking = w->lidar_to_tracking * point_lidar;
 
-        // Cartographer expects the cloud time to be the last point timestamp.
-        const float ratio = has_reliable_angular_progress
-                ? acquisition_progress[i] / total_angular_travel
-                : (count > 1 ? i / static_cast<float>(count - 1) : 1.f);
-        const float point_time_offset = -scan_duration + ratio * scan_duration;
-
         point_cloud.push_back({point_tracking.cast<float>(), point_time_offset});
     }
 
     env->ReleaseFloatArrayElements(ranges, ranges_ptr, JNI_ABORT);
     env->ReleaseFloatArrayElements(angles, angles_ptr, JNI_ABORT);
     if (point_cloud.empty()) return;
+    const int64_t cloud_end_ns = RebaseLidarPointTimes(ts, &point_cloud);
 
     std::lock_guard<std::mutex> lock(w->data_mutex);
     auto* traj = w->map_builder->GetTrajectoryBuilder(tid);
@@ -447,7 +429,7 @@ CartographerNativeAddRangefinderData(
 
     // 组装点云数据
     cartographer::sensor::TimedPointCloudData timed_point_cloud_data{
-            FromMonotonicAndroidElapsedRealtimeNanos(ts, &w->last_range_universal_ticks),
+            FromMonotonicAndroidElapsedRealtimeNanos(cloud_end_ns, &w->last_range_universal_ticks),
             w->lidar_to_tracking.translation().cast<float>(),
             point_cloud
     };

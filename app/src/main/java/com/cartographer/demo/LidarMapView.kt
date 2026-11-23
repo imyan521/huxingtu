@@ -144,10 +144,8 @@ class LidarMapView @JvmOverloads constructor(
         style = Paint.Style.FILL
     }
 
-    fun setLiveScan(scan: LidarScan, pose: Pose2D?) {
-        if (scan.timestampNs <= liveScanTimestampNs) return
-        liveScanTimestampNs = scan.timestampNs
-        val p = pose ?: latestPose
+    fun setCurrentPose(p: Pose2D) {
+        if (p == latestPose && trajectory.isNotEmpty()) return
         latestPose = p
 
         val poseX = p.x.toFloat()
@@ -159,6 +157,13 @@ class LidarMapView @JvmOverloads constructor(
             trajectory.addLast(pathPoint)
             while (trajectory.size > 2000) trajectory.removeFirst()
         }
+        invalidate()
+    }
+
+    fun setLiveScan(scan: LidarScan, pose: Pose2D?) {
+        pose?.let { setCurrentPose(it) }
+        if (scan.timestampNs <= liveScanTimestampNs) return
+        liveScanTimestampNs = scan.timestampNs
 
         liveScanPoints.clear()
         val count = minOf(scan.ranges.size, scan.anglesDeg.size)

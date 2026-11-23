@@ -77,6 +77,9 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
     private lateinit var tvMapMeasurement: TextView
     private lateinit var mapView: LidarMapView
     private lateinit var floorPlanView: ZoomableImageView
+    private lateinit var switchLidarOnly: android.widget.Switch
+    @Volatile private var selectedSlamInputMode = SlamInputMode.LIDAR_IMU
+    @Volatile private var activeSlamInputMode = SlamInputMode.LIDAR_IMU
     private lateinit var btnStartMapping: Button
     private lateinit var btnFinishMapping: Button
     private lateinit var btnContinueMapping: Button
@@ -231,6 +234,28 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         checkTrajectoryOverlay = findViewById(R.id.check_trajectory_overlay)
 
         lidarParser = LidarParser(carto)
+        switchLidarOnly = findViewById(R.id.switch_lidar_only)
+        val preferences = getSharedPreferences("mapping_input", Context.MODE_PRIVATE)
+        selectedSlamInputMode = if (intent.hasExtra(SlamInputMode.INTENT_EXTRA)) {
+            SlamInputMode.fromName(intent.getStringExtra(SlamInputMode.INTENT_EXTRA))
+        } else if (preferences.getBoolean("lidar_only", false)) {
+            SlamInputMode.LIDAR_ONLY
+        } else SlamInputMode.LIDAR_IMU
+        switchLidarOnly.isChecked = !selectedSlamInputMode.usesImu
+        switchLidarOnly.setOnCheckedChangeListener { _, checked ->
+            if (checked == !selectedSlamInputMode.usesImu) return@setOnCheckedChangeListener
+            if (isMappingRunning || isFinishingMapping) {
+                switchLidarOnly.isChecked = !selectedSlamInputMode.usesImu
+                show("请先结束建图，再切换建图模式")
+                return@setOnCheckedChangeListener
+            }
+            selectedSlamInputMode = if (checked) SlamInputMode.LIDAR_ONLY else SlamInputMode.LIDAR_IMU
+            preferences.edit().putBoolean("lidar_only", checked).apply()
+            if (isSensorRunning) {
+                sensorManager.unregisterListener(this)
+                startSensors()
+            }
+        }
 
         findViewById<Button>(R.id.btn_start_sensor).setOnClickListener {
             if (!isSensorRunning) {
@@ -239,7 +264,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                 isSensorRunning = true
                 Toast.makeText(
                     this,
-                    "IMU + LiDAR + 磁力计已开启",
+                    "${selectedSlamInputMode.displayName}传感器已开启",
                     Toast.LENGTH_SHORT
                 ).show()
             }
@@ -401,6 +426,8 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
     }
 
     private fun startCartographer(mapToLoad: File?) {
+        val inputMode = selectedSlamInputMode
+        activeSlamInputMode = inputMode
         setDataReceivePaused(true)
 
         Thread {
@@ -408,14 +435,11 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                 val localConfigDir = File(filesDir, "config")
                 prepareCartographerConfig(localConfigDir)
 
-                val configurationFile = if (mapToLoad == null) {
-                    "android_2d.lua"
-                } else {
-                    "android_2d_continue.lua"
-                }
+                val configurationFile = inputMode.configurationFile(continuing = mapToLoad != null)
                 val ok = carto.initialize(
                     localConfigDir.absolutePath,
-                    configurationFile
+                    configurationFile,
+                    useImuData = inputMode.usesImu
                 )
                 if (!ok) {
                     handleMappingStartFailure("初始化失败")
@@ -498,10 +522,11 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         // Binary SDK deliveries carry obfuscated configuration resources rather
         // than plaintext Lua. Decrypt only into the app-private files directory.
         val key = byteArrayOf(0x43, 0x61, 0x72, 0x74, 0x6f, 0x53, 0x44, 0x4b)
-        val protectedAssets = assets.list("carto_cfg").orEmpty().filter { it.endsWith(".bin") }
+        val protectedDirectory = if (selectedSlamInputMode.usesImu) "carto_cfg" else "carto_cfg/lidar_only"
+        val protectedAssets = assets.list(protectedDirectory).orEmpty().filter { it.endsWith(".bin") }
         require(protectedAssets.isNotEmpty()) { "Cartographer configuration is missing" }
         protectedAssets.forEach { name ->
-            val bytes = assets.open("carto_cfg/$name").use { it.readBytes() }
+            val bytes = assets.open("$protectedDirectory/$name").use { it.readBytes() }
             for (index in bytes.indices) {
                 bytes[index] = (bytes[index].toInt() xor key[index % key.size].toInt()).toByte()
             }
@@ -523,9 +548,16 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
         // IMU 模式：
         val a = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         val g = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
-        sensorManager.registerListener(this, a, SensorManager.SENSOR_DELAY_FASTEST)
-        sensorManager.registerListener(this, g, SensorManager.SENSOR_DELAY_FASTEST)
-        lidarParser.enableLidarAfterImuReady()
+        hasAccelerationSample = false
+        hasGyroscopeSample = false
+        lastImuSendNs = 0L
+        if (selectedSlamInputMode.usesImu) {
+            sensorManager.registerListener(this, a, SensorManager.SENSOR_DELAY_FASTEST)
+            sensorManager.registerListener(this, g, SensorManager.SENSOR_DELAY_FASTEST)
+            lidarParser.enableLidarAfterImuReady()
+        } else {
+            lidarParser.enableLidar()
+        }
         if (!magneticHeadingProvider.start()) {
             show("当前设备没有可用磁力计，建图不受影响，但无法进行地图南北对齐")
         } else {
@@ -568,8 +600,10 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
 
             usbIoManager = SerialInputOutputManager(port, object : SerialInputOutputManager.Listener {
                 override fun onNewData(data: ByteArray) {
+                    val receivedAtNs = SystemClock.elapsedRealtimeNanos()
                     lidarCount += data.size
                     if (pauseDataReceive) return
+                    carto.recordUsbData(receivedAtNs, data)
 
                     // ✅ 不加 isMappingRunning 判断！不点建图也能读雷达！
                     try {
@@ -598,7 +632,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
     }
 
     override fun onSensorChanged(e: SensorEvent) {
-        if (!isSensorRunning) return
+        if (!isSensorRunning || !selectedSlamInputMode.usesImu) return
 
         when (e.sensor.type) {
             Sensor.TYPE_ACCELEROMETER -> {
@@ -647,6 +681,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                 val nowMs = SystemClock.elapsedRealtime()
                 updateSlamTiming(status, nowMs)
                 val pose2d = pose?.to2D()
+                if (!pauseDataReceive && pose2d != null) mapView.setCurrentPose(pose2d)
                 if (isMappingRunning && !isFinishingMapping &&
                     mappingMode == MappingMode.NORMAL_MAPPING && pose2d != null) {
                     onlineMagneticNorthCalibrator.addSample(magneticState, pose2d)
@@ -733,6 +768,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
 
                     Cartographer：
                     雷达帧：${status.rangeFrames}
+                    建图输入：${activeSlamInputMode.displayName}
                     IMU：${status.imuSamples} 帧
                     LocalSLAM：${status.localSlamResults}
                     插入节点：${status.insertedNodes}
@@ -994,7 +1030,7 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                 latestOnlineMagneticResult = it
             }
         } else null
-        if (mappingMode == MappingMode.NORMAL_MAPPING &&
+        if (activeSlamInputMode.usesImu && mappingMode == MappingMode.NORMAL_MAPPING &&
             onlineResultBeforeFinish?.isReady != true) {
             val result = onlineResultBeforeFinish ?: OnlineMagneticNorthCalibrator.Result()
             val nextAction = when {
@@ -1034,14 +1070,14 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                     }
                     latestOnlineMagneticResult = finalResult
                     val headingState = magneticHeadingProvider.getState()
-                    pendingNorthAlignment = MapNorthAlignment(
+                    pendingNorthAlignment = if (finalResult.isReady) MapNorthAlignment(
                         magneticNorthYawRadians = normalizeRadians(
                             finalResult.magneticNorthYawRadians.toDouble() +
                                 DEVICE_TO_ROBOT_HEADING_OFFSET_RAD
                         ).toFloat(),
                         headingAccuracy = headingState.accuracy,
                         sampleTimestampNs = headingState.timestampNs
-                    )
+                    ) else null
                 }
                 val optimizedSubmaps = carto.getSubmapTextures()
                 val optimizedTrajectory = carto.getTrajectoryNodePoses()
@@ -1054,8 +1090,8 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                     replaceMeasurementTextures(optimizedSubmaps)
                     mapView.setOptimizedTrajectory(optimizedTrajectory)
                     val hasNorthAlignment = pendingNorthAlignment != null
-                    btnSaveMap.isEnabled = hasNorthAlignment
-                    btnContinueMapping.isEnabled = hasNorthAlignment
+                    btnSaveMap.isEnabled = hasNorthAlignment || !activeSlamInputMode.usesImu
+                    btnContinueMapping.isEnabled = hasNorthAlignment || !activeSlamInputMode.usesImu
                     btnCancelContinueMapping.visibility = View.GONE
                     btnMapNorth.visibility = View.GONE
                     if (hasNorthAlignment) {
@@ -1067,7 +1103,9 @@ open class MainActivity : AppCompatActivity(), SensorEventListener {
                             "建图与优化已完成，已根据行走过程自动完成南北对齐"
                         })
                     } else {
-                        show("地图缺少可靠的磁北方向，无法生成南北对齐户型图")
+                        show(if (!activeSlamInputMode.usesImu)
+                            "纯雷达建图与优化已完成，可以保存；磁北数据不足，户型图保留地图方向"
+                        else "地图缺少可靠的磁北方向，无法生成南北对齐户型图")
                     }
                 }
             } catch (e: Exception) {

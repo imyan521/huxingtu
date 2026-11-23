@@ -1,14 +1,14 @@
-# Cartographer Device SDK 1.2.0
+# Cartographer Device SDK 1.3.0
 
 Closed-source Android SDK for the supported CH340 lidar. The SDK owns USB permission/serial I/O,
 phone IMU collection, lidar frame parsing, SLAM, map persistence, relocalization primitives and
-floor-plan generation. It does not provide an Activity or UI.
+floor-plan generation. A packaged full-experience Activity is also available.
 
 ## Compatibility
 
 - Android API 26 or newer
 - `arm64-v8a` only
-- USB host device with accelerometer and gyroscope
+- USB host device; accelerometer and gyroscope are required for the default IMU mode
 - Lidar USB VID/PID `1A86:7523`, serial settings `230400 8N1`
 
 ## Gradle
@@ -28,7 +28,7 @@ dependencies {
 When published to the private Maven repository, use:
 
 ```kotlin
-implementation("com.cartographer:device-sdk:1.2.0")
+implementation("com.cartographer:device-sdk:1.3.0")
 ```
 
 ## Lifecycle
@@ -51,7 +51,7 @@ For a custom UI, use the lower-level lifecycle below.
 7. After `FINISHED`, read `MagneticNorthAlignment`, then save/load maps or generate a floor plan.
 8. Call `close()` when the owning application scope is destroyed.
 
-The SDK dynamically registers USB receivers and does not install an Activity or Application class.
+The SDK dynamically registers USB receivers and declares FullExperienceActivity; it does not install an Application class.
 All listener methods and file-operation callbacks run on the Android main thread.
 Java callers can extend `CartographerListenerAdapter` instead of implementing every callback.
 
@@ -118,3 +118,64 @@ from the AAR, checks required ARM64 libraries, and writes a `.sha256` file next 
 
 The SDK is binary-obfuscated, not cryptographically impossible to reverse engineer. Contractual
 confidentiality and no-reverse-engineering terms remain necessary.
+
+## Optional lidar-only mapping (1.3.0)
+
+Existing `SdkConfig` constructors and `initialize(context, config, listener)` calls remain valid and use IMU fusion.
+To use lidar-only mapping, select the mode when creating a new SDK instance:
+
+```kotlin
+val sdk = CartographerSdk.initialize(
+    applicationContext, SdkConfig(), MappingInputMode.LIDAR_ONLY, listener
+)
+// Wait for MappingState.READY, then use the normal permission/connect/startMapping flow.
+```
+
+The mode stays fixed for that instance. Close it before creating an instance with another mode.
+The full UI also has a switch (off on first launch, then remembered):
+
+```kotlin
+startActivity(CartographerSdk.createFullExperienceIntent(this, MappingInputMode.LIDAR_ONLY))
+```
+
+The explicit Intent mode overrides the remembered UI choice for that launch.
+Lidar-only profiles disable IMU input, track `base_link`, use a 15-degree angular search
+window and a Ceres rotation weight of 10. They support new maps and frozen-map supplement
+collection. `loadMap` must be called before `startMapping` for supplement collection.
+The original SDK IMU profile assets and phone IMU configuration are preserved.
+
+In lidar-only mode, a missing magnetometer or incomplete magnetic calibration does not block
+start/stop/save. North-alignment callbacks and metadata are produced only when calibration is
+ready (or restored from a loaded map). Otherwise maps retain their SLAM orientation.
+Default IMU mode retains its existing magnetic-calibration requirement.
+
+Supported hardware remains the existing `1A86:7523` CH340 lidar with `230400 8N1`.
+The PDA KLD42 USB driver, A-class protocol and board-IMU startup are separate hardware
+adaptations and are not part of this port. Phone scan timing and outlier filtering are retained.
+Switch modes only after finishing or cancelling mapping; load the original map again to supplement it.
+
+## SDK 1.3.0 source project
+
+This repository contains the SDK implementation, rather than only the binary delivery.
+
+- `cartographer-sdk/src/main/java/com/cartographer/sdk/`: public API, USB/sensor management and lifecycle.
+- `app/src/main/java/com/cartographer/demo/`: shared mapping implementation and the full mobile UI.
+- `app/src/main/assets/config/`: editable mapping profiles, including lidar-only new-map/supplement profiles.
+- `cartographer-android/jni/`: JNI source and per-point lidar timing helper.
+- `app/src/test/` and `cartographer-sdk/src/test/`: unit tests.
+
+For Kotlin/UI/configuration changes, use JDK 17 and Android SDK 34, configure `sdk.dir` in
+`local.properties`, then build from the repository root:
+
+```bash
+./gradlew -PusePrebuiltNative=true :cartographer-sdk:testDebugUnitTest :cartographer-sdk:verifyReleaseAar
+```
+
+This compiles the SDK source and packages the exact four ARM64 native libraries from the
+published `cartographer-sdk/releases/1.3.0/cartographer-sdk-release.aar`. It does not require a
+pre-existing `cartographer/build-android/libcartographer.a` or a local OpenCV build.
+The resulting AAR is `cartographer-sdk/build/outputs/aar/cartographer-sdk-release.aar`.
+
+The property is opt-in. Without it, the existing CMake/NDK native build is retained, including its
+original Cartographer/OpenCV/third-party build prerequisites. C++ changes require that native
+build; the prebuilt option compiles Kotlin, resources and configuration while reusing native binaries.

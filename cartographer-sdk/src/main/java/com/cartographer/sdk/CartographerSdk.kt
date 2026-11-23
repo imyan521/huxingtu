@@ -41,7 +41,8 @@ import java.util.concurrent.atomic.AtomicBoolean
 class CartographerSdk private constructor(
     context: Context,
     private val config: SdkConfig,
-    private val listener: CartographerListener
+    private val listener: CartographerListener,
+    private val inputMode: MappingInputMode
 ) : AutoCloseable, SensorEventListener {
 
     private val appContext = context.applicationContext
@@ -138,7 +139,7 @@ class CartographerSdk private constructor(
         return SdkResult.success()
     }
 
-    /** Starts phone IMU collection and a new SLAM trajectory. */
+    /** Starts a trajectory using this instance's input mode. */
     fun startMapping(): SdkResult {
         if (closed.get()) return SdkResult.failure(SdkError.CLOSED, "SDK is closed")
         if (!initialized) return SdkResult.failure(SdkError.NOT_INITIALIZED, "SDK initialization failed")
@@ -146,8 +147,8 @@ class CartographerSdk private constructor(
         val accelerometer = sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         val gyroscopeSensor = sensorManager.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
         mappingUsesExistingNorthAlignment = magneticNorthAlignment != null
-        if (accelerometer == null || gyroscopeSensor == null ||
-            (!mappingUsesExistingNorthAlignment && !magneticHeadingProvider.isSupported)) {
+        if (inputMode.usesImu && (accelerometer == null || gyroscopeSensor == null ||
+            (!mappingUsesExistingNorthAlignment && !magneticHeadingProvider.isSupported))) {
             mapping.set(false)
             return SdkResult.failure(
                 SdkError.SENSOR_UNAVAILABLE,
@@ -163,19 +164,28 @@ class CartographerSdk private constructor(
             magneticNorthCalibrator.reset()
             latestMagneticCalibration = MagneticCalibrationStatus()
             magneticHeadingProvider.beginCalibration()
-            if (!magneticHeadingProvider.start()) {
+            if (!magneticHeadingProvider.start() && inputMode.usesImu) {
                 mapping.set(false)
                 return SdkResult.failure(SdkError.SENSOR_UNAVAILABLE, "Magnetometer registration failed")
             }
         }
-        native.startTrajectory()
+        parser.clearLatestScanAndPendingData()
+        if (native.startTrajectory() < 0) {
+            mapping.set(false)
+            magneticHeadingProvider.stop()
+            return SdkResult.failure(SdkError.INITIALIZATION_FAILED, "Trajectory could not be started")
+        }
         hasAcceleration = false
         hasGyroscope = false
         lastImuTimestampNs = 0L
-        sensorManager.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_FASTEST)
-        sensorManager.registerListener(this, gyroscopeSensor, SensorManager.SENSOR_DELAY_FASTEST)
-        sensorsRunning.set(true)
-        parser.enableLidarAfterImuReady()
+        if (inputMode.usesImu) {
+            sensorManager.registerListener(this, accelerometer, SensorManager.SENSOR_DELAY_FASTEST)
+            sensorManager.registerListener(this, gyroscopeSensor, SensorManager.SENSOR_DELAY_FASTEST)
+            sensorsRunning.set(true)
+            parser.enableLidarAfterImuReady()
+        } else {
+            parser.enableLidar()
+        }
         post { listener.onMappingStateChanged(MappingState.MAPPING) }
         scheduleSnapshot()
         return SdkResult.success()
@@ -190,7 +200,7 @@ class CartographerSdk private constructor(
                 latestMagneticCalibration = it.toSdkStatus()
             }
         }
-        if (!mappingUsesExistingNorthAlignment && liveResult?.isReady != true) {
+        if (inputMode.usesImu && !mappingUsesExistingNorthAlignment && liveResult?.isReady != true) {
             return SdkResult.failure(
                 SdkError.MAGNETIC_CALIBRATION_INCOMPLETE,
                 "${liveResult?.failureReason ?: "Magnetic calibration unavailable"}; " +
@@ -220,15 +230,15 @@ class CartographerSdk private constructor(
                 }
                 latestMagneticCalibration = finalResult.toSdkStatus()
                 val headingState = magneticHeadingProvider.getState()
-                MagneticNorthAlignment(
+                if (finalResult.isReady) MagneticNorthAlignment(
                     magneticNorthYawRadians = finalResult.magneticNorthYawRadians,
                     headingAccuracy = headingState.accuracy,
                     sampleTimestampNs = headingState.timestampNs,
                     isHighInterference = finalResult.isHighInterference
-                )
+                ) else null
             }
             magneticNorthAlignment = alignment
-            post { listener.onMagneticNorthAlignment(alignment) }
+            if (alignment != null) post { listener.onMagneticNorthAlignment(alignment) }
             post { listener.onMappingStateChanged(MappingState.FINISHED) }
         }
         return SdkResult.success()
@@ -262,7 +272,7 @@ class CartographerSdk private constructor(
             when {
                 mapping.get() -> SdkResult.failure(SdkError.ALREADY_MAPPING, "Stop mapping before loading")
                 !input.isFile -> SdkResult.failure(SdkError.IO_ERROR, "Map file does not exist")
-                native.loadMap(input.absolutePath, true) -> {
+                loadNativeMap(input) -> {
                     magneticNorthAlignment = MapMetadataStore.load(input)?.let {
                         MagneticNorthAlignment(
                             magneticNorthYawRadians = it.magneticNorthYawRadians,
@@ -275,6 +285,14 @@ class CartographerSdk private constructor(
                 else -> SdkResult.failure(SdkError.IO_ERROR, "Map could not be loaded")
             }
         }
+    }
+
+    private fun loadNativeMap(input: File): Boolean {
+        if (!inputMode.usesImu) {
+            val configDir = unpackConfiguration()
+            if (!native.initialize(configDir.absolutePath, "android_2d_lidar_only_continue.lua", false)) return false
+        }
+        return native.loadMap(input.absolutePath, true)
     }
 
     fun getSubmapTextures(callback: (List<SubmapTexture>) -> Unit): SdkResult {
@@ -455,7 +473,7 @@ class CartographerSdk private constructor(
     }
 
     override fun onSensorChanged(event: SensorEvent) {
-        if (!mapping.get()) return
+        if (!mapping.get() || !inputMode.usesImu) return
         when (event.sensor.type) {
             Sensor.TYPE_ACCELEROMETER -> {
                 event.values.copyInto(acceleration, endIndex = 3)
@@ -499,7 +517,8 @@ class CartographerSdk private constructor(
                 report(SdkError.CONFIGURATION_ERROR, "Configuration extraction failed", it)
                 return@execute
             }
-            initialized = native.initialize(configDir.absolutePath, "android_2d.lua")
+            val configFile = if (inputMode.usesImu) "android_2d.lua" else "android_2d_lidar_only.lua"
+            initialized = native.initialize(configDir.absolutePath, configFile, useImuData = inputMode.usesImu)
             if (!initialized) report(SdkError.INITIALIZATION_FAILED, "Native SLAM initialization failed")
             else post { listener.onMappingStateChanged(MappingState.READY) }
         }
@@ -600,19 +619,24 @@ class CartographerSdk private constructor(
     }
 
     private fun unpackConfiguration(): File {
-        val output = File(appContext.noBackupFilesDir, "cartographer-sdk/config-$SDK_VERSION")
+        val output = File(appContext.noBackupFilesDir, "cartographer-sdk/config-$SDK_VERSION/${inputMode.name}")
+        // Preserve the existing SDK's default assets; pure lidar uses the phone/PDA profiles.
+        val assetDirectory = if (inputMode.usesImu) "carto_cfg" else "carto_cfg/lidar_only"
         if (File(output, ".complete").isFile) return output
         output.deleteRecursively()
         output.mkdirs()
         val key = byteArrayOf(0x43, 0x61, 0x72, 0x74, 0x6f, 0x53, 0x44, 0x4b)
-        appContext.assets.list("carto_cfg").orEmpty().filter { it.endsWith(".bin") }.forEach { assetName ->
-            val encrypted = appContext.assets.open("carto_cfg/$assetName").use { it.readBytes() }
+        appContext.assets.list(assetDirectory).orEmpty().filter { it.endsWith(".bin") }.forEach { assetName ->
+            val encrypted = appContext.assets.open("$assetDirectory/$assetName").use { it.readBytes() }
             for (index in encrypted.indices) encrypted[index] =
                 (encrypted[index].toInt() xor key[index % key.size].toInt()).toByte()
             val plainName = assetName.removeSuffix(".bin")
             File(output, plainName).writeBytes(encrypted)
         }
         require(File(output, "android_2d.lua").isFile) { "android_2d.lua is missing" }
+        if (!inputMode.usesImu) require(File(output, "android_2d_lidar_only.lua").isFile) {
+            "Pure lidar configuration is missing"
+        }
         File(output, ".complete").writeText(SDK_VERSION)
         return output
     }
@@ -862,7 +886,7 @@ class CartographerSdk private constructor(
         else getParcelableExtra(UsbManager.EXTRA_DEVICE)
 
     companion object {
-        const val SDK_VERSION = "1.2.0"
+        const val SDK_VERSION = "1.3.0"
         const val SUPPORTED_VENDOR_ID = 0x1A86
         const val SUPPORTED_PRODUCT_ID = 0x7523
         private const val BAUD_RATE = 230400
@@ -870,12 +894,28 @@ class CartographerSdk private constructor(
 
         @JvmStatic
         fun initialize(context: Context, config: SdkConfig = SdkConfig(), listener: CartographerListener): CartographerSdk =
-            CartographerSdk(context, config, listener).also { it.initializeInternal() }
+            initialize(context, config, MappingInputMode.LIDAR_IMU, listener)
+
+        /** Additive overload: existing SdkConfig and initialize signatures are unchanged. */
+        @JvmStatic
+        fun initialize(
+            context: Context,
+            config: SdkConfig,
+            inputMode: MappingInputMode,
+            listener: CartographerListener
+        ): CartographerSdk =
+            CartographerSdk(context, config, listener, inputMode).also { it.initializeInternal() }
 
         /** Returns an Intent for the packaged page containing every reference-app feature. */
         @JvmStatic
         fun createFullExperienceIntent(context: Context): Intent =
             Intent(context, FullExperienceActivity::class.java)
+
+        @JvmStatic
+        fun createFullExperienceIntent(context: Context, inputMode: MappingInputMode): Intent =
+            createFullExperienceIntent(context).putExtra(
+                com.cartographer.demo.SlamInputMode.INTENT_EXTRA, inputMode.name
+            )
     }
 }
 

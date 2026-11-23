@@ -8,7 +8,12 @@ plugins {
 }
 
 group = "com.cartographer"
-version = "1.2.0"
+version = "1.3.0"
+
+// Opt-in source rebuild using the exact native binaries from the published SDK.
+val usePrebuiltNative = providers.gradleProperty("usePrebuiltNative")
+    .map { it.toBooleanStrict() }.getOrElse(false)
+val prebuiltNativeDirectory = layout.buildDirectory.dir("generated/prebuiltNative")
 
 android {
     namespace = "com.cartographer.demo"
@@ -19,7 +24,7 @@ android {
         minSdk = 26
         consumerProguardFiles("consumer-rules.pro")
         ndk { abiFilters += "arm64-v8a" }
-        externalNativeBuild {
+        if (!usePrebuiltNative) externalNativeBuild {
             cmake {
                 cppFlags += listOf("-std=c++17", "-frtti", "-fexceptions", "-fvisibility=hidden", "-ffunction-sections", "-fdata-sections")
                 arguments += listOf("-DANDROID_STL=c++_shared", "-DANDROID_PLATFORM=android-26")
@@ -35,7 +40,7 @@ android {
         }
     }
 
-    externalNativeBuild {
+    if (!usePrebuiltNative) externalNativeBuild {
         cmake {
             path = file("../cartographer-android/CMakeLists.txt")
             version = "3.22.1"
@@ -53,7 +58,8 @@ android {
             java.srcDir(layout.buildDirectory.dir("generated/internalSources"))
             assets.srcDir(layout.buildDirectory.dir("generated/encryptedAssets"))
             res.srcDir("../app/src/main/res")
-            jniLibs.srcDir("../MyApplication/app/src/main/cpp/opencv/libs")
+            if (usePrebuiltNative) jniLibs.srcDir(prebuiltNativeDirectory)
+            else jniLibs.srcDir("../MyApplication/app/src/main/cpp/opencv/libs")
         }
     }
 
@@ -86,6 +92,15 @@ val encryptSdkAssets by tasks.registering {
             for (index in bytes.indices) bytes[index] = (bytes[index].toInt() xor assetKey[index % assetKey.size].toInt()).toByte()
             destination.resolve("$relative.bin").writeBytes(bytes)
         }
+        // Keep legacy SDK assets unchanged, and package the phone profiles separately.
+        val pureDestination = destination.resolve("lidar_only").apply { mkdirs() }
+        inputDir.resolve("config").listFiles().orEmpty()
+            .filter { it.isFile && it.extension == "lua" }.forEach { source ->
+                val bytes = source.readBytes()
+                for (index in bytes.indices) bytes[index] =
+                    (bytes[index].toInt() xor assetKey[index % assetKey.size].toInt()).toByte()
+                pureDestination.resolve("${source.name}.bin").writeBytes(bytes)
+            }
     }
 }
 
@@ -97,7 +112,19 @@ val prepareInternalSources by tasks.registering(Copy::class) {
     into(layout.buildDirectory.dir("generated/internalSources"))
 }
 
-tasks.named("preBuild").configure { dependsOn(encryptSdkAssets, prepareInternalSources) }
+val preparePublishedNative by tasks.registering(Copy::class) {
+    from(zipTree(file("releases/1.3.0/cartographer-sdk-release.aar"))) {
+        include("jni/arm64-v8a/*.so")
+        eachFile { path = path.removePrefix("jni/") }
+        includeEmptyDirs = false
+    }
+    into(prebuiltNativeDirectory)
+}
+
+tasks.named("preBuild").configure {
+    dependsOn(encryptSdkAssets, prepareInternalSources)
+    if (usePrebuiltNative) dependsOn(preparePublishedNative)
+}
 
 dependencies {
     api("com.github.mik3y:usb-serial-for-android:3.4.6")
@@ -128,6 +155,12 @@ val verifyReleaseAar by tasks.registering {
         ZipFile(aar).use { zip ->
             val bad = zip.entries().asSequence().map { it.name }.filter { name -> forbidden.any { name.endsWith(it) } }.toList()
             require(bad.isEmpty()) { "Forbidden files in release AAR: $bad" }
+            require(zip.getEntry("assets/carto_cfg/lidar_only/android_2d_lidar_only.lua.bin") != null) {
+                "Missing pure lidar profile"
+            }
+            require(zip.getEntry("assets/carto_cfg/lidar_only/android_2d_lidar_only_continue.lua.bin") != null) {
+                "Missing pure lidar supplement profile"
+            }
             require(zip.getEntry("jni/arm64-v8a/libcartographer-jni.so") != null) { "Missing arm64 Cartographer native library" }
             require(zip.getEntry("jni/arm64-v8a/libfloorplan-jni.so") != null) { "Missing arm64 floor-plan native library" }
             val unexpectedAbis = zip.entries().asSequence().map { it.name }

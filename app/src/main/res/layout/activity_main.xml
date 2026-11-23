@@ -13,6 +13,14 @@
         android:orientation="vertical"
         android:padding="16dp">
 
+        <Switch
+            android:id="@+id/switch_lidar_only"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:minHeight="48dp"
+            android:text="纯雷达建图（关闭时使用 IMU 融合）"
+            android:checked="false" />
+
         <Button
             android:id="@+id/btn_start_sensor"
             android:layout_width="match_parent"
